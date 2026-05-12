@@ -45,5 +45,3 @@ requiring deep on-chain inventory.
 - [Jupiter Aggregator](integration/jupiter.md) — Jupiter integration
 - [Pool Controls](safety/pool-controls.md) — pause flags and authority model
 - [FAQ](faq.md)
-
-<sub>build: docs-v2-sync-check-1778606272-f85c5423</sub>
