@@ -45,3 +45,8 @@ requiring deep on-chain inventory.
 - [Jupiter Aggregator](integration/jupiter.md) — Jupiter integration
 - [Pool Controls](safety/pool-controls.md) — pause flags and authority model
 - [FAQ](faq.md)
+- [License (BUSL-1.1)](license.md) — Cube is source-available, not open source
+
+---
+
+> **Note on licensing.** Cube is released under the **Business Source License 1.1**. The source is public so it can be reviewed and integrated against, but it is **not permission to fork and redeploy the protocol**. See [License](license.md) for details. The license auto-converts to Apache 2.0 on 2030-05-12.

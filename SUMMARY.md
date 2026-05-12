@@ -43,3 +43,7 @@
 ## FAQ
 
 * [FAQ](faq.md)
+
+## License
+
+* [License (BUSL-1.1)](license.md)
