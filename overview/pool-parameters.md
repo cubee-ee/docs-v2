@@ -13,6 +13,8 @@ fields below; the full account schema is in the program IDL.
 | **Token list** | 2–10 unique SPL Token or Token-2022 mints. Each token's program is stored on the pool. |
 | **Banned Token-2022 extensions** | Mints with these extensions are rejected at pool creation (`TransferFeeConfig`, `ConfidentialTransferMint`, `NonTransferable`, `InterestBearingConfig`, `PermanentDelegate`, `TransferHook` by default). |
 | **Weights** | Basis points; sum = 10,000. Each weight in `[100, 9_900]` (1%–99%). |
+| **Initial virtual balances** | One `u64` per token. Must be `> 0` and `≤ u64::MAX` (`18_446_744_073_709_551_615`). The pricing curve uses these; they grow on swaps (`checked_add`) and `MathOverflow` on u64 wrap. |
+| **Leverage (UI only)** | UI-side multiplier feeding `initial_virtual_balance = floor(actual_amount × leverage)` via 1e9 fixed-point. UI bounds: `0.00001 .. 100_000_000` (100M). At init the hard ceiling is `floor(u64::MAX / amount_raw)` — e.g. ~1.84×10⁸ for a 100B-raw slot; the 100M cap keeps a ~2× buffer for swap-driven growth. |
 | **Pool ID** | `u64` salt. PDA: `seeds = ["cubic_pool", config, pool_id.to_le_bytes()]`. |
 
 ---
