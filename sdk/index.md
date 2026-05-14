@@ -77,6 +77,30 @@ swap across multiple Cube pools for best execution) see
 
 ---
 
+## Token-2022 support
+
+Cube pools accept both classic SPL Token and Token-2022 mints, and a
+single pool can mix both programs. The SDK decodes
+`tokens[i].tokenProgram` from the on-chain pool account and threads it
+through every builder, so callers can pass mints straight from the
+pool — no extra plumbing required.
+
+What this means in practice:
+
+- `buildSwapTx`, `buildAddLiquidityTx`, `buildRemoveLiquidityTx`, and
+  `buildSingleTokenDepositTx` derive user ATAs under the correct
+  program and emit the right `token_program_i` in
+  `remaining_accounts`.
+- The BPT mint always uses classic SPL Token. Override via
+  `bptTokenProgram` on `buildInitializeCubicPoolIx` if a non-default
+  program is required.
+- Extensions that change transfer amounts (transfer fee, transfer
+  hook, confidential transfer) are **not** supported — the AMM math
+  expects the vault delta to equal the requested amount, otherwise
+  the program reverts with `BalanceMismatch`.
+
+---
+
 ## Network configuration
 
 ```ts
