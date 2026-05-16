@@ -1,4 +1,6 @@
-# @cube/sdk
+# @cubee_ee/sdk
+
+📦 **npm**: <https://www.npmjs.com/package/@cubee_ee/sdk>
 
 A TypeScript client for interacting with Cube pools on Solana.
 Designed for integrators (aggregators, wallets, bots) who want quotes,
@@ -13,7 +15,7 @@ parsing, and PDA derivation for you.
 ## Install
 
 ```bash
-npm install @cube/sdk
+npm install @cubee_ee/sdk
 ```
 
 Peer dependencies: `@solana/web3.js`, `@solana/spl-token`,
