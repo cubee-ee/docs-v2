@@ -18,8 +18,8 @@ rewards halve at the end of every 4-month period.
 | **Provide liquidity** | **50 XP per $1 per day** | While the LP position remains active |
 
 - **Swap XP** is one-shot and is calculated on the **LP fees that the
-  swap generates for the pool** — not on raw swap volume. The headline
-  rate is **10,000 XP per $1 of LP fees**. There is no claim step.
+  swap generates for the pool**. The headline rate is **10,000 XP per
+  $1 of LP fees**. There is no claim step.
 
   > **Example.** A pool with a **1% swap fee**: a $1 swap generates
   > $0.01 of LP fees, which credits the swapper **100 XP**. A pool
