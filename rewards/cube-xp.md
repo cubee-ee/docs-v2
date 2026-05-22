@@ -131,8 +131,6 @@ long-term rewards system** for Cube users.
 ## What XP is for
 
 XP is the protocol's single, persistent record of contribution to Cube.
-We expect the program to run for roughly **12–18 months** of decaying
-emissions across multiple epochs.
 
 If Cube ever introduces a token in the future, XP **may eventually be
 convertible** into it. This is not a commitment to a token launch —
