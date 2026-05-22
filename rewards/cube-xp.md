@@ -107,7 +107,7 @@ future allocation to LPs and traders would be calculated.
 ## Links
 
 - **XP Documentation** → this page
-- **Leaderboard** → in-app, under the *Rewards* tab
+- **Leaderboard** → https://cubee.ee/leaderboard
 
 ---
 
