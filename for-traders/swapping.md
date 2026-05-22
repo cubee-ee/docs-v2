@@ -87,7 +87,7 @@ Set this value based on your acceptable price tolerance — typically 0.5%–1% 
 ### Swap Fee
 
 - Charged on the **input** token
-- Range: 0% to 1% (stored as `u32`, where 10,000 = 1%)
+- Range: 0% to 10% (stored as `u32` in hundredths of a basis point — `10,000` = 1%, max `100,000` = 10%)
 - The fee stays in the pool vault, increasing actual balances for LPs
 - Zero-fee swaps are rejected when `swap_fee_rate > 0` (prevents dust micro-swaps)
 
