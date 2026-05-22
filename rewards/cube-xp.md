@@ -21,11 +21,11 @@ rewards halve at the end of every 4-month period.
   swap generates for the pool**. The headline rate is **10,000 XP per
   $1 of LP fees**. There is no claim step.
 
-  > **Example.** A pool with a **1% swap fee**: a $1 swap generates
-  > $0.01 of LP fees, which credits the swapper **100 XP**. A pool
-  > with a 0.3% swap fee would generate $0.003 of LP fees on the same
-  > $1 swap, crediting 30 XP. A pool with a 2% swap fee would credit
-  > 200 XP.
+  > **Example.** On a **$100 swap**, a pool with a **1% swap fee**
+  > generates $1 of LP fees, which credits the swapper **10,000 XP**.
+  > A pool with a 0.3% swap fee would generate $0.30 of LP fees on the
+  > same $100 swap, crediting 3,000 XP. A pool with a 2% swap fee
+  > would credit 20,000 XP.
 
   In other words, swap XP per $1 of volume **scales with the pool's
   fee tier** — high-fee pools naturally credit more XP per $1 swapped,
