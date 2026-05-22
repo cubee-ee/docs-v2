@@ -36,6 +36,10 @@
 * [Overview](sdk/index.md)
 * [Single-token deposit](sdk/single-token-deposit.md)
 
+## Rewards
+
+* [Cube XP](rewards/cube-xp.md)
+
 ## Safety & Governance
 
 * [Pool Controls](safety/pool-controls.md)
