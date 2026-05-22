@@ -93,9 +93,9 @@ end of every epoch the per-dollar XP rates are **cut in half**.
 | 3 | 2,500 XP | 12.5 XP |
 | … | halved each epoch | halved each epoch |
 
-The swap rate column is **XP per $1 of LP fees**, not per $1 of swap
-volume — the effective XP per $1 of volume depends on each pool's fee
-tier (see [Why swap XP is pool-dependent](#why-swap-xp-is-pool-dependent)).
+The swap rate column is **XP per $1 of LP fees** — the effective XP
+per $1 of volume depends on each pool's fee tier (see [Why swap XP is
+pool-dependent](#why-swap-xp-is-pool-dependent)).
 The halving schedule applies on top: at the start of each new epoch
 the rate is halved, regardless of pool.
 
