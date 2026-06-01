@@ -1,7 +1,7 @@
 # What is Cube?
 
 **Cube** is a weighted automated market maker (AMM) on **Solana**.
-Each pool holds 2–10 tokens with configurable weights and a virtual
+Each pool holds 2–9 tokens with configurable weights and a virtual
 liquidity layer that lets pools quote tight spreads without
 requiring deep on-chain inventory.
 
@@ -11,7 +11,7 @@ requiring deep on-chain inventory.
 
 | Feature | Description |
 | --- | --- |
-| Multi-asset pools | 2–10 tokens per pool |
+| Multi-asset pools | 2–9 tokens per pool via UI/SDK (10 supported on-chain via CLI deploy) |
 | Custom weights | 1%–99% per token, sums to 100% |
 | Capital-efficient pricing | Virtual liquidity layer for tight spreads |
 | Proportional liquidity | No tick management — all LPs earn proportionally |
@@ -40,9 +40,8 @@ requiring deep on-chain inventory.
 - [Pool Parameters](overview/pool-parameters.md) — what's configurable per pool
 - [Pricing Model](technical/math.md) — swap formula and fee behaviour
 - [Smart Contracts](technical/smart-contracts.md) — instructions integrators call
-- [API Reference](integration/api-reference.md) — backend REST endpoints
+- [API Reference](integration/api-reference.md) — backend REST endpoints (**API key required** — see below)
 - [Swap Routing](integration/swap-routing.md) — split-route execution
-- [Jupiter Aggregator](integration/jupiter.md) — Jupiter integration
 - [Pool Controls](safety/pool-controls.md) — pause flags and authority model
 - [FAQ](faq.md)
 - [License (BUSL-1.1)](license.md) — Cube is source-available, not open source
@@ -50,3 +49,14 @@ requiring deep on-chain inventory.
 ---
 
 > **Note on licensing.** Cube is released under the **Business Source License 1.1**. The source is public so it can be reviewed and integrated against, but it is **not permission to fork and redeploy the protocol**. See [License](license.md) for details. The license auto-converts to Apache 2.0 on 2030-05-12.
+
+---
+
+## Getting API access
+
+The Cube backend (pools list, swap routing, stats, leaderboard, transactions feed) is gated behind an API key. **Reach out before integrating** — we issue keys per-project and can advise on rate limits / preferred RPC endpoints.
+
+- Telegram chat: **[@cubee\_chat](https://t.me/cubee_chat)**
+- Direct: **[@sepezho](https://t.me/sepezho)**
+
+The on-chain program is permissionless — anyone can call its instructions directly. The API gating only applies to the convenience backend that wraps RPC reads with prices, TVL, and pool metadata.

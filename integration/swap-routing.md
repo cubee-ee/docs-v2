@@ -2,6 +2,8 @@
 
 The Cube backend includes a smart order router that splits swaps across multiple pools for optimal execution. This page explains how the routing algorithm works and how integrators can use it.
 
+> 🔐 **API key required** — the `/api/pools/swap-route` endpoint is part of the gated backend. Request a key via [@cubee\_chat](https://t.me/cubee_chat) or [@sepezho](https://t.me/sepezho). See [API Reference](api-reference.md) for the full auth model.
+
 ---
 
 ## Overview

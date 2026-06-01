@@ -1,22 +1,22 @@
 # Single-token deposit
 
+> 🚧 **In development — not in production yet.** This module is currently under audit. The on-chain program (`single_token_liquidity`) is deployed on devnet but **not on mainnet**, and the frontend hides single-token deposit on mainnet. Integrators should treat this page as a forward-looking design doc — interfaces may shift before launch.
+>
+> For mainnet today, use the standard proportional `add_liquidity` path on `cubic_pool`. See [Liquidity](../for-lps/liquidity.md).
+
 A helper that lets an LP add liquidity to a multi-token Cube pool by
 supplying a single token. The helper performs the internal swaps
 required to assemble a proportional basket and mints BPT to the user
 — all in one transaction.
 
-This is implemented by a dedicated on-chain program and surfaced
-through `@cube/sdk` (`CubicPoolClient.singleTokenDeposit` /
+Implemented by a dedicated on-chain program and surfaced through
+`@cube/sdk` (`CubicPoolClient.buildSingleTokenDepositTx` /
 `SingleTokenDepositClient`).
 
 ## Status
 
-- **Mainnet:** not deployed. The frontend hides the single-token
-  deposit flow on mainnet.
+- **Mainnet:** not deployed (in audit). Frontend hides the flow.
 - **Devnet:** deployed for testing.
-
-Until the helper ships on mainnet, integrators on mainnet should use
-the standard proportional `add_liquidity` path on `cubic_pool`.
 
 ## SDK surface
 

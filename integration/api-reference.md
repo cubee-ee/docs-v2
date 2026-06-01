@@ -1,17 +1,37 @@
 # API Reference
 
 The Cube backend exposes a REST API for pool discovery, swap routing,
-statistics, and data retrieval. Pool endpoints sit under
-`/api/pools`; the time-series statistics endpoints under `/api/stats`.
+statistics, leaderboard, and data retrieval. Pool endpoints sit under
+`/api/pools`; time-series statistics under `/api/stats`; leaderboard
+under `/api/leaderboard`.
 
 Base URL: `https://api.cubee.ee`
+
+---
+
+> 🔐 **API key required.** The Cube backend is gated. Before integrating, request a key:
+>
+> - Telegram chat: **[@cubee\_chat](https://t.me/cubee_chat)**
+> - Direct: **[@sepezho](https://t.me/sepezho)**
+>
+> Pass the key as a header on every request:
+>
+> ```
+> X-Cube-Api-Key: <your-key>
+> ```
+>
+> The on-chain program is permissionless — anyone can call its instructions directly via RPC. The API gating only applies to the convenience backend that wraps RPC reads with prices, TVL, indexed transactions, and pool metadata.
+
+---
 
 > **Tip** — You probably don't need this reference directly. The
 > [@cube/sdk](../sdk/index.md) ships a typed `CubeBackendClient` that
 > wraps every endpoint listed here, returns `SdkResult<T>` instead of
 > throwing, and handles retry + human-readable error mapping. Frontend
 > and backend integrations should consume the SDK rather than calling
-> these endpoints directly.
+> these endpoints directly. The SDK reads the API key from the
+> `CubeConfig` you pass to `getConfig({ apiKey })` and sends it
+> automatically.
 
 ---
 
@@ -48,10 +68,20 @@ Returns the most recent pools, ordered by pinned status then creation date.
       "poolEnabled": true,
       "swapsEnabled": true,
       "tvlUsd": 125000.50,
+      "virtualTvlUsd": 312500.00,
       "volume24h": 45000.00,
       "apy": 12.5,
       "bptMint": "GHI...rst",
       "bptTotalSupply": "1000000000",
+      "poolAdmin": "ABC...xyz",
+      "pendingPoolAdmin": null,
+      "rangeManager": "RNG...mgr",
+      "rangeManagerEnabled": true,
+      "rangeManagerMaxVbChangeBps": 500,
+      "rangeManagerMaxWeightChangeBps": 500,
+      "rangeManagerMinUpdateIntervalSecs": 60,
+      "rangeManagerLastUpdated": "1748044800",
+      "lookupTable": "ALT...lut",
       "tokens": [
         {
           "mintAddress": "So11111111111111111111111111111111111111112",
@@ -62,6 +92,8 @@ Returns the most recent pools, ordered by pinned status then creation date.
           "actualBalance": "1000000000000",
           "virtualBalance": "2000000000000",
           "protocolFeesOwed": "0",
+          "maxSelloff": "0",
+          "maxSelloffPeriodLength": 0,
           "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
           "vaultAddress": "JKL...opq",
           "orderIndex": 0,
@@ -511,3 +543,84 @@ SDK:
 const r = await sdkBackend().getStats("tvl", "30d", poolAddr, "usd");
 if (r.ok) console.log(r.data.points);
 ```
+
+---
+
+## Leaderboard
+
+XP leaderboard for the Cube reward program. See [Cube XP](../rewards/cube-xp.md) for the full reward model — these endpoints are the read-side of it.
+
+### Get leaderboard (paginated)
+
+```
+GET /api/leaderboard?page=1&limit=20
+```
+
+Returns a paginated list of wallets ranked by cumulative XP points (descending).
+
+**Response:**
+
+```json
+{
+  "total": 847,
+  "page": 1,
+  "limit": 20,
+  "data": [
+    {
+      "address": "6NAL3YafKj9NPv3bkvdTxph33VGM9ayoJRNaTeBhTAaz",
+      "points": 152340.5,
+      "place": 1
+    }
+  ]
+}
+```
+
+### Get epoch info
+
+```
+GET /api/leaderboard/epoch
+```
+
+Returns everything needed to render the epoch widget: current epoch number, ms-until-next-epoch (for client-side countdown), base + current XP rates, halving multiplier, and the full history of past epochs.
+
+### Get user XP details
+
+```
+GET /api/leaderboard/user/:address
+```
+
+Returns the user's current rank, accumulated points, and per-source breakdown (swap vs LP, per pool).
+
+### Get user XP history
+
+```
+GET /api/leaderboard/user/:address/history?from=<ts>&to=<ts>
+```
+
+Returns per-day XP accrual entries over a window. Used by the user profile page to render the points-over-time chart.
+
+---
+
+## DefiLlama Adapter
+
+Public endpoints used by DefiLlama and similar dashboards. **Not gated** — these don't require an API key (DefiLlama scrapes them anonymously).
+
+```
+GET  /api/defillama/dimensions   # Volume + fees + revenue by chain/day
+GET  /api/defillama/tvl          # Current TVL snapshot
+GET  /api/defillama/yields       # Per-pool APY series
+GET  /api/defillama/info         # Protocol metadata
+GET  /api/defillama/diag         # Diagnostic — adapter health
+```
+
+These follow DefiLlama's adapter spec and are documented at `defillama.com/protocol/cube`.
+
+---
+
+## Webhooks (internal)
+
+```
+POST /internal/webhooks/helius
+```
+
+Reserved for the indexer's Helius webhook ingest path. **Not a public endpoint** — restricted by a separate webhook secret, not the API key. Listed here only to disambiguate; integrators don't call it.

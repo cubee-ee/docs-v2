@@ -12,13 +12,13 @@
 ## For Liquidity Providers
 
 * [How Yield is Generated](for-lps/how-yield-is-generated.md)
-* [Adding Liquidity](for-lps/adding-liquidity.md)
-* [Removing Liquidity](for-lps/removing-liquidity.md)
+* [Liquidity (Add / Remove)](for-lps/liquidity.md)
 * [Tracking Pool Activity](for-lps/tracking-pool-activity.md)
 
 ## For Traders
 
 * [Swapping](for-traders/swapping.md)
+* [Max-Selloff Window](for-traders/max-selloff.md)
 
 ## Technical
 
@@ -29,7 +29,6 @@
 
 * [API Reference](integration/api-reference.md)
 * [Swap Routing](integration/swap-routing.md)
-* [Jupiter Aggregator](integration/jupiter.md)
 
 ## SDK
 

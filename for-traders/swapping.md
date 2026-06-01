@@ -8,14 +8,15 @@ Cube supports **EXACT_IN** swaps — you specify the amount of input token, and 
 
 1. User specifies: `amount_in`, `minimum_amount_out`, `token_in_index`, `token_out_index`
 2. The program validates the pool is enabled, swaps are enabled, and token indices are valid
-3. Swap fee is deducted from the input: `fee = floor(amount_in * swap_fee_rate / 1,000,000)`
-4. Protocol fee is computed from the swap fee: `protocol_fee = floor(fee * protocol_fee_rate / 10,000)`
-5. LP-accessible balances are computed by excluding `protocol_fees_owed`
-6. Output is calculated using the weighted AMM formula on the scaled virtual balances
-7. The result must be <= LP-accessible output balance or the swap reverts
-8. Slippage check: `amount_out >= minimum_amount_out`
-9. Tokens are transferred: input from user to vault, output from vault to user
-10. Balances and invariant are updated
+3. **Max-selloff window check** — if the pool admin has set a cap on this token's `amount_in`, the swap must stay under the sliding-window threshold. See [Max-Selloff Window](max-selloff.md) for the math.
+4. Swap fee is deducted from the input: `fee = floor(amount_in * swap_fee_rate / 1,000,000)`
+5. Protocol fee is computed from the swap fee: `protocol_fee = floor(fee * protocol_fee_rate / 10,000)`
+6. LP-accessible balances are computed by excluding `protocol_fees_owed`
+7. Output is calculated using the weighted AMM formula on the scaled virtual balances
+8. The result must be <= LP-accessible output balance or the swap reverts
+9. Slippage check: `amount_out >= minimum_amount_out`
+10. Tokens are transferred: input from user to vault, output from vault to user
+11. Balances and invariant are updated
 
 ### Swap Formula
 
@@ -69,8 +70,11 @@ Price impact depends on:
 For small trades, the price is approximately the spot price:
 
 ```
-spotPrice = (virtualBalanceIn / weightIn) / (virtualBalanceOut / weightOut)
+spotPrice(in → out) = (virtualBalanceIn / weightIn) / (virtualBalanceOut / weightOut)
+                    × 10^(decimalsOut − decimalsIn)
 ```
+
+Reference: `WeightedMath::calc_spot_price` in `programs/cubic-pool/src/math/mod.rs`. The simpler `vbIn / vbOut` ratio is only correct for 50/50 pools — for asymmetric weights, missing the weight factor gives wrong prices.
 
 ---
 
@@ -79,6 +83,20 @@ spotPrice = (virtualBalanceIn / weightIn) / (virtualBalanceOut / weightOut)
 The `minimum_amount_out` parameter protects against excessive slippage. If the calculated output is less than this amount, the transaction reverts with `SlippageExceeded`.
 
 Set this value based on your acceptable price tolerance — typically 0.5%–1% below the expected output from the swap route API.
+
+---
+
+## Max-Selloff Window
+
+Each token in a pool has an optional per-token sell-side rate limit. If your `amount_in` would push the sliding-window cumulative volume past the configured cap, the swap reverts with `MaxSelloffExceeded` **before any state mutates** — your funds stay put.
+
+The cap protects LPs against one-sided dumping. As a trader, you should:
+
+1. **Know the cap exists.** Read `pool.tokens[i].config.max_selloff` and `max_selloff_period_length` (or query via the [API](../integration/api-reference.md)). `max_selloff = 0` means no limit on that token.
+2. **Pre-compute headroom** before submitting — the sliding-window state (`previous_selloff`, `current_selloff`, `window_start_timestamp`) is in `pool.tokens[i].dynamics` and lets you predict exactly when the swap would fail.
+3. **Split or wait** if you're hitting the cap. The Cube routing backend automatically routes around capped pools when a multi-hop path exists.
+
+Full math + worked examples + on-chain reference: **[Max-Selloff Window](max-selloff.md)**.
 
 ---
 
