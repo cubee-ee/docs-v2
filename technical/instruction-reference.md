@@ -1,6 +1,6 @@
 # Instruction Reference
 
-This page covers all **59 instructions** in the three current contract IDLs: 28 Cubic Pool, 29 Protocol Admin, and 2 Single Token Liquidity. Verified against contracts [`96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and the matching SDK 0.11.1 IDLs at [`27de819`](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/idl).
+This page covers all **59 instructions** in the three current contract IDLs: 28 Cubic Pool, 29 Protocol Admin, and 2 Single Token Liquidity. Verified against contracts [`96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and the matching SDK 0.11.1 IDLs at [`09cc776`](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/idl).
 
 ## Encoding and units
 
@@ -30,11 +30,11 @@ All these entrypoints return `Result<()>`: success/failure, with no typed instru
 
 ### TokenChange
 
-| Field (serialization order) | Type |
-| --- | --- |
-| `index` | `u8` |
-| `expected_current` | `u64` |
-| `new_value` | `u64` |
+| Field (serialization order) | Type | Meaning |
+| --- | --- | --- |
+| `index` | `u8` | Index below `token_count`; no duplicate index within either change list |
+| `expected_current` | `u64` | Observed raw virtual balance in `vb_changes`, or weight in basis points in `weight_changes` |
+| `new_value` | `u64` | Positive replacement in the same units; subject to the manager's per-update limits and final pool invariants |
 
 `SelloffParams` replaces the full policy vector. `fee_slope_mid_pct` and `fee_kink_pct` come after `fee_slope_high_pct`; do not rearrange them into visual curve order. `TokenChange.expected_current` is the compare-and-swap guard. See [controls](../safety/pool-controls.md) for all associated validation.
 
@@ -86,7 +86,7 @@ Replaces config.protocol_admin and clears pending. A PDA successor must accept t
 
 Discriminator: `b59d59438fb63448`.
 
-Requires pool_enabled. Seed at zero BPT supply takes the supplied basket with at least one positive amount and mints from virtual-balance invariant; supply must be at least 1,000. Later amounts are ceilings for a proportional basket, live/zero-reserve token liveness must match. minimum_bpt_amount bounds minted BPT. SDK additionally rejects zero-transfer live legs.
+Requires pool_enabled. Seed at zero BPT supply takes the supplied basket with at least one positive amount and mints from virtual-balance invariant; supply must be at least 1,000. Later amounts are ceilings for a proportional basket, live/zero-reserve token liveness must match. minimum_bpt_amount bounds minted BPT. Token accounts needed for nonzero transfers must already exist; the normal SDK transaction creates only the user BPT ATA. See [account setup](../for-lps/liquidity.md#account-setup). SDK additionally rejects zero-transfer live legs.
 
 **Authority:** User; initial seed additionally requires non-renounced pool_admin.
 
@@ -260,7 +260,7 @@ Creates a 202-byte config; Treasury PDA is enforced as a signer and becomes prot
 
 Discriminator: `d79474cf79686f83`.
 
-Creates pool and BPT mint under an existing config. 2–10 distinct mint accounts define token order. Weights sum to 10,000, each 100–9,900; virtual balances > 0; fee ≤ 100,000; decimals ≤ 18; extension checks apply. Starts with zero actual balances; seed deposit is separate.
+Creates pool and BPT mint under an existing config, with no reserve vault ATA creation. 2–10 distinct mint accounts define token order. Weights sum to 10,000, each 100–9,900; virtual balances > 0; fee ≤ 100,000; decimals ≤ 18; extension checks apply. Starts with zero actual balances; seed deposit is separate.
 
 **Authority:** Any payer; becomes pool_admin.
 
@@ -286,7 +286,7 @@ Creates pool and BPT mint under an existing config. 2–10 distinct mint account
 
 Discriminator: `fb874202f4490c90`.
 
-Requires non-renounced pool_admin even on protocol path and unset lookup_table. Creates, extends with 6 + 2×token_count pool addresses, then freezes ALT; stores address on pool. Address derives from authority and recent_slot. Repeated init fails.
+Requires non-renounced pool_admin even on protocol path and unset lookup_table. Creates, extends with 6 + 2×token_count pool addresses, then freezes ALT; stores address on pool. Address derives from authority and recent_slot. Repeated init fails. The table contains pool-scoped addresses, not user/helper ATAs; it creates no token accounts. Newly added addresses cannot be used in the same slot.
 
 **Authority:** Pool admin OR config.protocol_admin; separate payer.
 
@@ -398,7 +398,7 @@ Requires pool_enabled, interval, nonempty sparse changes, unique valid indices a
 
 Discriminator: `5055d14818ceb16c`.
 
-Requires pool_enabled and positive requested burn ≤ supply. Effective burn is min(request, supply − 1,000); excess BPT remains in the wallet. Pays proportional actual reserves with fixed-point rounding and checks every minimum_token_amounts entry against the effective burn.
+Requires pool_enabled and positive requested burn ≤ supply. Effective burn is min(request, supply − 1,000); excess BPT remains in the wallet. Pays proportional actual reserves with fixed-point rounding and checks every minimum_token_amounts entry against the effective burn. Every user reserve-token account is validated even for a zero output; the normal SDK transaction creates these ATAs idempotently before removal.
 
 **Authority:** BPT account owner (user).
 

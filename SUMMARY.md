@@ -37,6 +37,7 @@
 ## SDK
 
 * [SDK Overview](sdk/index.md)
+* [Read State and Calculate a Swap](sdk/state-and-quotes.md)
 * [SDK Reference](sdk/reference.md)
 * [Single-Token Deposit](sdk/single-token-deposit.md)
 

@@ -1,6 +1,6 @@
 # Smart Contracts
 
-This reference describes contracts [`audit-fixes-excluded-SF` at `96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK [`0.11.1` at `27de819`](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src). Defaults below are values written by this code; an existing account may contain different settings.
+This reference describes contracts [`audit-fixes-excluded-SF` at `96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK [`0.11.1` at `09cc776`](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src). Defaults below are values written by this code; an existing account may contain different settings.
 
 ## Programs and deployment
 
@@ -16,7 +16,7 @@ The interface has **59 instructions**: 28 in Cubic Pool, 29 in Protocol Admin, a
 
 ## Public operations
 
-`initialize_cubic_pool` is permissionless under an existing config. Its payer becomes that pool's admin. It creates the pool account and BPT mint, with zero actual reserves; it does not supply liquidity. The current pool admin performs the seed deposit through `add_liquidity`. Config creation itself requires the Treasury's authorized CPI.
+`initialize_cubic_pool` is permissionless under an existing config. Its payer becomes that pool's admin. It creates the pool account and BPT mint, with zero actual reserves; it does not create reserve vault ATAs or supply liquidity. The current pool admin prepares the needed token accounts and performs the seed deposit through `add_liquidity`; see [account setup](../for-lps/liquidity.md#account-setup). Config creation itself requires the Treasury's authorized CPI.
 
 `swap` takes exact gross input and a minimum net output. It validates both token indices, mints, token programs, vault addresses and user accounts. Pool trading must be enabled and the input token must be active. It advances the input token's selloff window using gross input, calculates the base input fee, prices the post-base-fee input against virtual balances, and deducts any surge fee from output. Output cannot exceed the LP-owned actual reserve. The complete rounding and fee sequence is in [math](math.md), [swapping](../for-traders/swapping.md), and [max-selloff](../for-traders/max-selloff.md).
 

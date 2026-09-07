@@ -1,6 +1,6 @@
 # Pool Parameters
 
-This reference describes contracts [`audit-fixes-excluded-SF` at `96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK [`0.11.1` at `27de819`](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src). Defaults below are values written by this code; an existing account may contain different settings.
+This reference describes contracts [`audit-fixes-excluded-SF` at `96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK [`0.11.1` at `09cc776`](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src). Defaults below are values written by this code; an existing account may contain different settings.
 
 Amounts are raw token integers unless explicitly stated. A token with 6 decimals represents one whole token as `1_000_000`; BPT uses 9 decimals. Use integer arithmetic and preserve `u64` values as `BN` or `bigint` in JavaScript. See [all account fields](../technical/accounts-events.md).
 
@@ -20,6 +20,13 @@ Amounts are raw token integers unless explicitly stated. A token with 6 decimals
 | Token extension policy | Creator override or config default, OR effective hard floor | Stored creation-policy snapshot; migration can backfill zero |
 
 Weights and virtual balances are not immutable. “Leverage” is the ratio `virtual_balance / actual_balance`; the contract stores the two balances rather than a standalone target-leverage field. The ratio is undefined for a zero actual reserve. Off-chain UI limits are not contract limits.
+
+A newly initialized pool has zero actual reserves, zero protocol-fee counters,
+and zero BPT supply. `pool_enabled`, `swaps_enabled`, and every live token's
+`is_active` start true. The pending pool admin, range-manager fields and ALT
+address start zero. Selloff policies/buckets/snapshots start zero, while each
+slot's `window_start_timestamp` is set to the initialization time. These are
+creation defaults, not the state of an existing pool.
 
 ## Fees and switches
 

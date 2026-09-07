@@ -5,13 +5,51 @@ This documentation was checked on **2026-09-07** against these source snapshots:
 | Component | Source revision | Scope |
 | --- | --- | --- |
 | Contracts | [`audit-fixes-excluded-SF`, `96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0) | All three programs, instruction handlers, account layouts, events and math |
-| SDK | [`main`, `27de819`, package version 0.11.1](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8) | Clients, builders, all three IDLs, parsers, math and backend method declarations |
+| SDK | [`main`, `09cc776`, package version 0.11.1](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5) | Clients, builders, all three IDLs, parsers, math and backend method declarations |
 | Backend | [`v5.1`, `a886497`](https://github.com/coffer-so/backend-v2/tree/a8864979a70b73d266a5ee0b88e9145e88354974) | Local route/auth, router, analytics and XP implementation used to check the API pages |
 
 A package version here identifies source, not an assertion about the current
 npm dist-tag. Check the package actually installed by the application. A branch
 name can move; commit IDs identify the implementation these pages describe.
 Local backend source also does not identify which revision a live server runs.
+
+At the registry check on **2026-09-07**, npm `latest` was **0.11.0**; the
+**0.11.1** source documented here had been pushed to GitHub but had not been
+published to npm. Installing an unqualified package name can therefore resolve
+an older API and older math. Check `npm view @cubee_ee/sdk version` and the
+application's lockfile, and deploy the tested package build with the application.
+Do not assume a Git commit changes a registry release or an already running site.
+
+## Verified mainnet programs
+
+All three programs were read from **mainnet-beta at 2026-09-07 21:41 UTC**.
+They were executable, their on-chain ELF prefix matched the local rollout
+artifact byte for byte, and any remaining ProgramData bytes were zero. Their
+upgrade authority was Treasury PDA
+`B4gyhrqLzX36VEu54ShqgTkb4TpXooTdxtcmvER3d3Bg`.
+
+| Program | Mainnet address | Deployment slot | ELF bytes |
+| --- | --- | --- | --- |
+| Cubic Pool | `8iQtGj9mcUfFUGaiCpPy89swC3s8YTC8FhVZWfgeZhwu` | 445105299 | 651536 |
+| Protocol Admin | `3jiojHZbjJQ7QLMGSTjFwxVEmx4NtuRy34nLAmsJME81` | 445104400 | 638728 |
+| Single Token Liquidity | `7BpdUH1tzTSXLuQNo6YpjJ8Eagw8AkrS6cnkxiJdCFS2` | 445104499 | 347952 |
+
+Single Token Liquidity is deployed on mainnet.
+
+The rollout artifacts' SHA-256 hashes were:
+
+```text
+cubic_pool.so
+ba2c9fbd0d3e5df5036f6ebbb4816a89bdfd6f6899c118922c2e87d943182a4b
+protocol_admin.so
+2b53d941112577126dfce6a5d6c7903cb56d77d459973de683b8534fbc1f9c1d
+single_token_liquidity.so
+790c24226aff41acf4b6976c420d82f4c49ab5998f1e920da29ed0e900f133bf
+```
+
+This is a dated comparison with the rollout binaries. It does not establish a
+reproducible source build or guarantee that an upgradeable program will keep
+the same bytes after a future upgrade.
 
 ## Contract and SDK surface
 
@@ -26,7 +64,7 @@ remaining accounts, create all required accounts, reserve a quote or guarantee
 transaction size. Normal high-level builders apply additional integration
 checks; the contract remains authoritative for execution.
 
-The SDK validation at this revision included 502 passing tests, including ABI
+The SDK validation at this revision included 517 passing tests, including ABI
 encoding, account layouts, 179 native Rust math reference vectors, sequential
 single-token quote examples and read-only mainnet checks. This is not proof that
 every administrative operation has been executed against production, or a

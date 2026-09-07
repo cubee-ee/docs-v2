@@ -1,6 +1,6 @@
 # REST API reference
 
-Coffer's backend provides indexed pool metadata, routing estimates, analytics, wallet authentication, portfolio views, referrals, and XP. This page compares SDK 0.11.1 (`27de819`) with the **local backend source** on branch `v5.1` at `a886497`. It is not a live-server inventory. A deployed backend may run another revision; verify its version and response shape before relying on an SDK method.
+Coffer's backend provides indexed pool metadata, routing estimates, analytics, wallet authentication, portfolio views, referrals, and XP. This page compares SDK 0.11.1 (`09cc776`) with the **local backend source** on branch `v5.1` at `a886497`. It is not a live-server inventory. A deployed backend may run another revision; verify its version and response shape before relying on an SDK method.
 
 Use your deployment's base URL as `apiEndpoint` when constructing `CubeBackendClient`. Endpoint paths below are relative to that URL. See [version scope](../technical/versions.md) and the [complete SDK method reference](../sdk/reference.md#cubebackendclient).
 
@@ -152,3 +152,8 @@ Availability of `/api/pools/swap-route` also does not imply support for the SDK'
 The backend includes IP-based throttling and browser CORS rules; deployment configuration and endpoint-specific policies affect access. A browser CORS allowance is not authentication. Handle 400 validation errors, 401 authentication failures, 403 authorization failures, 404 missing resources, 429 throttling, and temporary server/RPC failures explicitly.
 
 `GET /health` returns health status and a timestamp; `GET /api/version` returns backend version information and a timestamp. Health alone does not prove that every indexed dataset is current or that the backend's reference bytecode matches an upgraded program.
+
+Sources: [pool routes](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/pool/pool.controller.ts),
+[sign-in verification](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/auth/auth.service.ts),
+[statistics routes](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/stats/stats.controller.ts),
+[SDK backend client](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/clients/CubeBackendClient.ts).

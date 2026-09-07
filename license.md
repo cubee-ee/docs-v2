@@ -5,7 +5,7 @@ file for the particular repository and revision being used.
 
 | Component | License in the checked source | Authoritative text |
 | --- | --- | --- |
-| SDK, revision `27de819` | MIT | [SDK LICENSE](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/LICENSE) |
+| SDK, revision `09cc776` | MIT | [SDK LICENSE](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/LICENSE) |
 | Contracts, revision `96a2ee2` | Business Source License 1.1 | [Contracts LICENSE](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/LICENSE) |
 | Backend, revision `a886497` | Business Source License 1.1 | [Backend LICENSE](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/LICENSE) |
 | This documentation | Business Source License 1.1 | [Documentation LICENSE](LICENSE) |

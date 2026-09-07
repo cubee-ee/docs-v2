@@ -1,6 +1,6 @@
 # SDK API reference
 
-This reference describes the public API of `@cubee_ee/sdk` 0.11.1 at `27de819`. Contract argument and account names follow the shipped IDLs from contract revision `96a2ee2`. Backend method availability is checked separately in the [REST reference](../integration/api-reference.md).
+This reference describes the public API of `@cubee_ee/sdk` 0.11.1 at `09cc776`. Contract argument and account names follow the shipped IDLs from contract revision `96a2ee2`. Backend method availability is checked separately in the [REST reference](../integration/api-reference.md).
 
 In the tables below, `PK` means `PublicKey`, `BN` is `bn.js`, `Ix` means `TransactionInstruction`, and `Result<T>` means `SdkResult<T>`. An `async` result is `Promise<Result<T>>`. Optional parameters end in `?`; defaults are shown where relevant. These abbreviations describe signatures; they are not additional package exports.
 
@@ -39,6 +39,11 @@ Constructor: `new CubicPoolClient({ config, poolAddress, rpc? })`. `poolAddress`
 Quotes require a successful `sync()`. Token indices and vectors use pool order. Amounts must fit the applicable unsigned integer widths. `nowSeconds` overrides cached Solana Clock time; it does not change the time an eventual transaction observes. The STLD `helperBalances` vector contains existing helper token ATA balances before the operation; omitted means zero, not “fetch automatically.”
 
 `PoolInfo` includes pool/config/admin and pending-admin addresses, token count and ordered `tokens`, BPT mint/supply/token program, enabled/swap flags, fee rates, range-manager configuration, lookup-table address, extension policy, and sell-off/window state. Per-token fields include mint, vault, token program, decimals, weight, actual and virtual balances, protocol fees owed, activation, and extension information. Keep these values from the same logical sync. They are not an atomic multi-account snapshot.
+
+See [Read State and Calculate a Swap](state-and-quotes.md) for the full field-by-field
+mapping, units, raw/ABI decoder differences, and a complete `sync()` → `quoteSwap()`
+example. `sync()` returns the config address, not the decoded config account;
+config and Treasury reads are shown separately there.
 
 ### Quote results
 
@@ -283,6 +288,17 @@ The example's `poolAddress` is a `PublicKey`. It only constructs the instruction
 `ContractEvent` is a discriminated union `{ program, kind, data }`; `data` retains IDL field names and all current event fields. The complete parser covers 60 known events across the three IDLs. Decoding is not proof of account ownership, transaction success, or the emitting program's identity. Check RPC ownership and confirmed execution/provenance before using decoded data for indexing.
 
 `BorshReader(buffer)` provides `remaining(): number`, `skip(n): void`, `u8/u16/u32(): number`, `u64/i64(): BN`, `bool(): boolean`, `pubkey(): PK`, `vecU64(): BN[]`, and `vecPubkey(): PK[]`. It is a low-level cursor, not a substitute for ABI and owner validation.
+
+The reader rejects truncated fields/vectors, invalid skips, and boolean bytes
+other than 0 or 1. `decodePoolAccount` also rejects the wrong discriminator,
+unexpected size, out-of-range token count, and noncanonical boolean fields. It
+preserves signed i64 timestamps and the reserved tail; `sync()` rejects values
+that cannot be represented exactly in its numeric timestamp/weight fields.
+
+`contractErrorMapForTests(program = "cubicPool")` is an exported **internal test
+hook** returning that program's numeric error table. Application integrations
+should use `describeProgramError` or `toSdkError`; the raw table is not a
+separate on-chain API or a guarantee of stable internal structure.
 
 ## RPC fallback
 

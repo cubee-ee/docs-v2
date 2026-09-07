@@ -61,3 +61,7 @@ Some history field names are retained for compatibility: `swapVolumeUsd` and `la
 Campaign methods also exist in the SDK, but their corresponding routes are absent from checked backend revision `a886497`. Their presence in TypeScript does not establish a currently active campaign, a prize pool, or payout terms. See the [REST availability table](../integration/api-reference.md#sdk-routes-not-present-in-the-checked-backend-revision).
 
 XP depends on successful indexing, price inputs, holder discovery, and scheduled processing. Display the last accrual time and distinguish pending estimates from credited points. Pool fees and LP redemption remain governed by the [smart contracts](../technical/smart-contracts.md); XP does not change their accounting.
+
+Sources: [accrual and referral calculations](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/leaderboard/leaderboard-cron.service.ts),
+[rates and epoch constants](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/config/constants.ts),
+[epoch schedule calculation](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/leaderboard/epoch.util.ts).

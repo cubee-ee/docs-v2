@@ -2,7 +2,7 @@
 
 A pool can limit how much of each token is **sold into the pool**. The limit is a percentage of a stored virtual-balance snapshot, enforced with two time buckets. A swap that exceeds it fails with `MaxSelloffExceeded`. This is separate from the [dynamic fee](dynamic-fee.md), which can increase the cost of an allowed swap as the same window fills.
 
-This page describes contracts `audit-fixes-excluded-SF` at `96a2ee2` and SDK `0.11.1` at `27de819`.
+This page describes contracts `audit-fixes-excluded-SF` at `96a2ee2` and SDK `0.11.1` at `09cc776`.
 
 ## What is limited
 
@@ -34,6 +34,12 @@ Each token's `dynamics` row contains:
 
 The SDK exposes these four values as `BN`. The policy fields `maxSelloffPct` and `maxSelloffPeriodLength` are numbers. Read complete state with `CubicPoolClient.sync()` before quoting; do not infer the state only from a volume chart.
 
+### An unopened window is not a disabled window
+
+A stored `selloff_vb_snapshot = 0` means the balance basis has not yet been initialized. With a positive `maxSelloffPct`, the next check resolves it from the **current pre-swap virtual balance**. A new or newly migrated token can therefore already have a usable cap and dynamic-fee curve even though no sell has initialized its snapshot. A UI should project the next check instead of hiding the limit because the stored snapshot is zero.
+
+For example, `maxSelloffPct = 1,000`, live virtual balance 1,000 tokens and zero snapshot resolve to a 100-token cap. By contrast, a live balance of one raw unit resolves to `floor(1 × 1,000 / 10,000) = 0`: the policy is enabled, but no positive sale fits. The enable/disable switch is the configured percentage, not whether the resolved cap is nonzero.
+
 ## Rotation and acceptance
 
 The contract reads `Clock::unix_timestamp`. Compute `elapsed = max(0, now − window_start_timestamp)`; a backward clock movement never rotates a window backward.
@@ -62,6 +68,14 @@ require effective_after <= cap
 
 Only on acceptance are the new buckets, timestamp and snapshot stored, with `current += gross_amount_in`. A rejected check commits none of its candidate changes. If a later fee, liquidity, slippage or token-transfer check fails, Solana transaction atomicity also rolls back the window update.
 
+For a fixed initialized current bucket and unchanged policy/liquidity, the theoretical headroom at elapsed time `e` is:
+
+```text
+headroom(e) = cap − current − floor(previous × (period − e) / period)
+```
+
+A negative result means even a zero-input helper check fails; there is no positive headroom. Do not clamp a negative result and then treat it as an unrestricted policy. At the next boundary the cap can change because the live virtual balance is captured, so extrapolating this formula past that boundary without rebasing is incorrect.
+
 This is a **two-bucket approximation**, not an exact record of every sale in the preceding `period` seconds. The previous bucket fades linearly; the current bucket does not decay until it becomes the previous one. One full period without a new sale therefore does not guarantee an entirely empty limiter. Two periods from the stored bucket start make both buckets stale, absent further successful updates.
 
 ## Why the snapshot changes
@@ -76,6 +90,8 @@ remove: value_new = value − floor(value × ratio_fp / 10^18)
 ```
 
 Here `value` is each of `selloff_vb_snapshot`, `previous_selloff` and `current_selloff`; the timestamp is unchanged. This applies only to tokens whose cap is enabled. Scaling both capacity and usage prevents adding then withdrawing liquidity from leaving an artificially large cap behind. A seed deposit does not run this proportional rescaling path.
+
+The `ratio_fp` is the actual liquidity instruction's fixed-point ratio: proportional joins take the minimum offered/live-actual ratio, and withdrawals use the effective burned-BPT ratio. It is not a dollar-value ratio and not a percentage inferred from the vault balance. The [liquidity math](../technical/math.md#subsequent-proportional-deposits) has the exact floors.
 
 Administrative virtual-balance changes do not call this LP rescaling helper. The new live basis is captured on a later window rotation, with the carryover conversion above. Policy changes also preserve the existing window state.
 
@@ -137,6 +153,8 @@ const headroom = observed === null
   : observed.maxSelloffCap - observed.effectiveSelloffBefore;
 ```
 
+`observed.vbSnapshot` and `observed.maxSelloffCap` are the **candidate** basis and cap at the supplied timestamp. `observed.effectiveSelloffBefore` is usage before adding this hypothetical input; `observed.effectiveSelloff` includes it. For the headroom call above they are equal because `amountIn` is zero. A displayed fill should divide by this resolved cap and separately represent a zero-cap enabled policy; dividing counters by a zero stored snapshot is not a valid display calculation.
+
 The helper throws `MaxSelloffExceeded` if the already-used amount exceeds a newly tightened cap, even for this zero-input calculation. No positive sale fits at that timestamp. Do not replace the check with `percentage × live_virtual_balance`, or assume missing counters are zero for an enabled policy.
 
 ## Configuration and events
@@ -151,4 +169,4 @@ A successful swap with an enabled window emits `MaxSelloffWindowAdvanced`: pool,
 
 - [Contract limiter and LP rescaling](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/math/max_selloff.rs)
 - [Policy instruction and validation](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/set_max_selloff.rs)
-- [SDK limiter](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/math/maxSelloff.ts)
+- [SDK limiter](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/math/maxSelloff.ts)

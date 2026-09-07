@@ -2,7 +2,7 @@
 
 Coffer's backend can suggest how to split an exact input amount among pools containing the same token pair. Each route is a direct swap between those two mints. This service does not construct a multi-hop route through an intermediate token or submit transactions.
 
-The backend routing behavior described here comes from local `backend-v2` branch `v5.1`, revision `a886497`. SDK quote behavior comes from `@cubee_ee/sdk` 0.11.1, revision `27de819`, for contracts `96a2ee2`. These revisions are not interchangeable; the checked router does not implement every rule in the current SDK quote path.
+The backend routing behavior described here comes from local `backend-v2` branch `v5.1`, revision `a886497`. SDK quote behavior comes from `@cubee_ee/sdk` 0.11.1, revision `09cc776`, for contracts `96a2ee2`. These revisions are not interchangeable; the checked router does not implement every rule in the current SDK quote path.
 
 ## Requesting a candidate allocation
 
@@ -85,3 +85,7 @@ For repeated swaps touching the same pool, independently quoting each against on
 The SDK quote exposes net `amountOut`, gross output, dynamic output fee, input swap fee, and protocol share. `priceImpactHbps` uses hundredths of a basis point. The backend display uses percentage fields and a best-candidate spot baseline; those values are not the same unit or necessarily the same calculation. See [pool mathematics](../technical/math.md) for the transaction quote.
 
 Backend `estimatedXp` is a rewards estimate derived from fee valuation, the epoch rate, and an optional authenticated referral boost. It is neither on-chain output nor a guaranteed immediate credit. Confirmed transactions still need to be indexed and processed by the [three-hour XP accrual](../rewards/cube-xp.md).
+
+Sources: [routing implementation](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/swap/swap-router.service.ts),
+[accepted query fields](https://github.com/coffer-so/backend-v2/blob/a8864979a70b73d266a5ee0b88e9145e88354974/src/pool/dto/swap-route-query.dto.ts),
+[SDK pool quote/build path](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/clients/CubicPoolClient.ts).

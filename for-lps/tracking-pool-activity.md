@@ -131,4 +131,4 @@ simple annualizations in the checked revision; see [fee income](how-yield-is-gen
 
 Sources: [event definitions](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/events.rs),
 [get_pool_info](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/get_pool_info.rs),
-[SDK parsers](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/parsers).
+[SDK parsers](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/parsers).

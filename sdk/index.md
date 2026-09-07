@@ -1,6 +1,6 @@
 # SDK
 
-`@cubee_ee/sdk` is Coffer's TypeScript library for reading pools, quoting swaps and liquidity operations, and constructing Solana instructions. These pages describe SDK **0.11.1**, source revision `27de819`, against the contracts in `audit-fixes-excluded-SF` at `96a2ee2`. See [version scope](../technical/versions.md) for the source revisions used by this documentation.
+`@cubee_ee/sdk` is Coffer's TypeScript library for reading pools, quoting swaps and liquidity operations, and constructing Solana instructions. These pages describe SDK **0.11.1**, source revision `09cc776`, against the contracts in `audit-fixes-excluded-SF` at `96a2ee2`. See [version scope](../technical/versions.md) for the source revisions used by this documentation.
 
 The SDK builds unsigned instructions and transactions. Your application supplies the wallet, obtains signatures, submits transactions, and confirms their outcome. `AdminClient.initializeTreasuryIfMissing` is an explicit exception: it can send a transaction through its Anchor provider.
 
@@ -65,6 +65,12 @@ A nonempty `rpcEndpoints` list replaces the endpoint list. A single `rpcEndpoint
 | Quote time override | Unix seconds, not milliseconds |
 
 `sync()` reads the pool, its mints, BPT supply, and Solana Clock. `getCached()` returns the last successful snapshot. Reads are not an atomic snapshot across all accounts, and quotes do not reserve liquidity. Sync again before building a user decision around a quote, and use explicit output floors when signing.
+
+The [state and quote guide](state-and-quotes.md) maps every operational contract
+field to `PoolInfo` and `PoolTokenInfo`, including all selloff counters, snapshot,
+period and dynamic-fee control points. It also shows exact nested ABI decoding
+and separate config/Treasury reads. These values are returned by `sync()`;
+there is no separate `getState()` method to enable them.
 
 For v5 accounts, `actualBalance` is the LP reserve. Protocol fees are tracked separately. Do not subtract `protocolFeesOwed` from `actualBalance` a second time. The SDK quote path uses the current integer math, fee rounding, sell-off windows, dynamic output fees, proportional deposits, and minimum remaining BPT rules described in [pool mathematics](../technical/math.md).
 

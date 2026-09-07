@@ -121,6 +121,32 @@ buckets and snapshots shrink with the burn ratio when the limiter is enabled.
 No swap fee or surge fee is charged by direct removal. Token-program, Solana
 transaction and account-creation costs are separate concerns.
 
+## Account setup
+
+The pool's initialization creates the pool account and BPT mint, but no reserve
+vaults. Neither direct liquidity handler creates token accounts. Account
+creation supplied by SDK 0.11.1 transaction builders is limited to:
+
+| Builder | Account creation included |
+| --- | --- |
+| `PoolFactoryClient.buildDeployPoolTx` | Creates the new pool and BPT mint once; no ATA setup |
+| `CubicPoolClient.buildAddLiquidityTx` | User BPT ATA only |
+| `CubicPoolClient.buildRemoveLiquidityTx` | User reserve-token ATAs for every pool token, including zero-output slots |
+
+Before seeding, create the canonical pool vault ATA for each token that will
+receive a positive transfer, and fund the admin's corresponding token account.
+The normal SDK uses user ATAs. Derive a vault using the pool PDA as the owner
+with off-curve owners allowed, the reserve mint, and that mint's token program.
+Use idempotent ATA-creation instructions with a SOL-funded payer; creating an
+account does not deposit tokens or mint BPT. A zero seed slot may defer its
+vault's creation until a later transfer needs it.
+
+After pool creation, a large pool can provision its
+[ALT](../technical/instruction-reference.md#cubic_poolinitialize_pool_alt)
+before the seed transaction. Wait until the table's addresses are usable in a
+later slot, and split ATA setup into separate transactions when needed to fit
+the message. An ALT records addresses; it does not create their token accounts.
+
 ## Instruction accounts
 
 Both instructions use these five named accounts, with separate Anchor context
@@ -170,4 +196,5 @@ A helper deposit also emits internal swap/join events plus its final
 
 Sources: [add handler](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/add_liquidity.rs),
 [remove handler](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/remove_liquidity.rs),
-[SDK client](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/clients/CubicPoolClient.ts).
+[SDK client](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/clients/CubicPoolClient.ts),
+[account-setup builders](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/clients/tx-builders.ts).

@@ -1,6 +1,6 @@
 # Accounts and Events
 
-This reference is generated from the matching contract and SDK IDLs at contracts [`96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK 0.11.1 [`27de819`](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/idl), with field meanings checked against the executable handlers. Fields appear in **Borsh serialization order**, with no Rust memory-alignment padding.
+This reference is generated from the matching contract and SDK IDLs at contracts [`96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK 0.11.1 [`09cc776`](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/idl), with field meanings checked against the executable handlers. Fields appear in **Borsh serialization order**, with no Rust memory-alignment padding.
 
 ## Account identities and layouts
 
@@ -19,6 +19,12 @@ STLD's IDL includes `CubicPool` and `CubicPoolConfig` because it consumes those 
 Current pool and config byte sizes remain unchanged from the 1,683-byte v4 family, but reserved bytes and some token configuration fields gained meaning. There is no account-level version tag that proves the migration completed. Older 1,154-byte v3 pools are not handled by `migrate_to_v5`. A legacy 786-byte Treasury requires the supervisor realloc path before using the current full layout decoder. See [migration](smart-contracts.md#migration-compatibility).
 
 The SDK's `decodeContractAccount(program, accountName, data)` checks current exact size and discriminator, returns IDL snake_case fields, and preserves u64/i64 values as `BN`. The caller must separately validate the RPC account's program owner. `CubicPoolClient.sync()` combines the stored pool with mint/BPT metadata and chain time for quoting. Neither decoding nor transaction simulation proves later execution will observe the same state.
+
+The [state and quote guide](../sdk/state-and-quotes.md) maps every field below to
+`RawPoolAccount` and the `PoolInfo`/`PoolTokenInfo` objects returned by `sync()`.
+It explains which values are fetched from mint/Clock accounts, which are derived,
+and which must be read separately. The current raw pool decoder also checks the
+discriminator and retains signed i64 timestamps and the reserved tail.
 
 ### CubicPool
 
@@ -920,4 +926,4 @@ Discriminator: `18f61b27dec4873d`.
 
 ## Error handling
 
-Instruction failures include both custom program errors and propagated Anchor, token-program, loader or runtime errors. The [three IDLs](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/idl) carry custom error codes and names. Decode the originating program rather than treating equal numeric codes from different programs as identical errors. Failed transactions can leave diagnostic logs but roll back their on-chain state changes; transaction fees may still be charged. Refresh state after stale-value, limit or slippage failures before constructing a replacement transaction.
+Instruction failures include both custom program errors and propagated Anchor, token-program, loader or runtime errors. The [three IDLs](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/idl) carry custom error codes and names. Decode the originating program rather than treating equal numeric codes from different programs as identical errors. Failed transactions can leave diagnostic logs but roll back their on-chain state changes; transaction fees may still be charged. Refresh state after stale-value, limit or slippage failures before constructing a replacement transaction.

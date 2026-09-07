@@ -2,7 +2,7 @@
 
 The pool supports **exact-input** swaps: you provide a gross input amount and a minimum acceptable output. The contract calculates a weighted AMM output, subtracts any applicable output-token dynamic fee, and checks the minimum against what you will actually receive.
 
-This page matches contracts `audit-fixes-excluded-SF` at `96a2ee2` and SDK `0.11.1` at `27de819`.
+This page matches contracts `audit-fixes-excluded-SF` at `96a2ee2` and SDK `0.11.1` at `09cc776`.
 
 ## Execution order
 
@@ -106,6 +106,22 @@ Pass the resulting `minAmountOut` when building the swap. It is computed from ou
 
 The optional fifth quote argument, `nowSeconds`, overrides the chain timestamp saved by `sync()`. Quotes do not reserve balances, freeze admin policy, or update the shared cache. Use fresh state close to submission and keep the output minimum on-chain even when an earlier quote succeeded.
 
+### What the quote depends on
+
+| Synchronized input | Effect on the quote |
+|---|---|
+| Input/output virtual balances and weights | Curve output and marginal spot output |
+| Output LP actual balance | Whether the gross curve output can be paid |
+| Base fee and protocol share | Fee-adjusted curve input and reserve/fee accounting |
+| Input token's cap, period, buckets and snapshot | Acceptance and effective before/after window fill |
+| Input token's threshold, low/mid/high rates and kink | Four-segment output surge charge |
+| Chain timestamp or explicit `nowSeconds` | Bucket rotation, decay and snapshot rebasing |
+| Pool flags, input activity and mint extensions | Whether the SDK permits this operation |
+
+A quote from before a policy update cannot predict the new policy. A later sale can consume headroom and raise surge; elapsed time can reduce the previous bucket's weight; a rotation or liquidity action can change the snapshot. All of these can affect execution even when no price chart visibly moves.
+
+The slippage parameter controls `floor(net_output × (1,000,000 − tolerance) / 1,000,000)`. It does not add a fee, and it cannot override `MaxSelloffExceeded`. With the [partial-window example](dynamic-fee.md#worked-example-a-partial-trade-crossing-the-kink), the expected output is 18.340071 tokens and the 0.5% minimum is 18.248370 tokens. The trader receives the execution result if it meets that minimum; the difference is not automatically charged.
+
 ## Price impact and window failures
 
 Curve impact depends on trade size relative to virtual balances and on the weight ratio. Actual output reserves can still limit a trade even when virtual depth is large. The human-unit marginal price in **output per input** is:
@@ -115,7 +131,16 @@ virtual_out × weight_in / (virtual_in × weight_out)
   × 10^(decimals_in − decimals_out)
 ```
 
-The SDK `priceImpactHbps` compares base-fee-adjusted spot output with **net output after surge**, so it includes surge's effect. Display the fee separately if you want to explain why output falls as the window fills.
+The SDK `priceImpactHbps` compares base-fee-adjusted spot output with **net output after surge**, so it includes surge's effect:
+
+```text
+spot_out = floor(curve_input × virtual_out × weight_in / (virtual_in × weight_out))
+impact   = floor((spot_out − user_output) × 1,000,000 / spot_out)
+```
+
+The helper returns zero if spot output is nonpositive or user output is at least spot output. `10,000` impact units mean **1%**, because this field uses hundredths of a basis point. The base fee has already reduced the reference input, so this is not total loss against a no-fee gross-input spot quote. Display the input base fee and output surge amount separately.
+
+For the 75%→95% window example, curve-only impact is 1.9550%, while this SDK field is 8.0237% after surge. The endpoint surge rate of 20% is a different quantity again. [Dynamic Fee](dynamic-fee.md#accounting-and-slippage) shows the full calculation.
 
 A `MaxSelloffExceeded` result means the gross input does not fit the candidate rolling window at the execution timestamp. A smaller input or another eligible pool may fit. Waiting can restore headroom as the previous bucket decays and windows rotate, but no particular route or retry is guaranteed to be available. See [Max-Selloff Window](max-selloff.md) for snapshot rebasing, LP rescaling and exact headroom calculation.
 
@@ -137,4 +162,4 @@ The `Swap` event's gross curve output can be recovered as `amount_out + surge_fe
 
 - [Swap instruction, fee rounding and events](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/swap.rs)
 - [Protocol-fee collection](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/admin/collect_protocol_fees.rs)
-- [SDK quote implementation](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/clients/CubicPoolClient.ts)
+- [SDK quote implementation](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/clients/CubicPoolClient.ts)

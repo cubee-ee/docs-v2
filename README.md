@@ -5,7 +5,7 @@ for settlement and virtual balances for pricing. Liquidity providers hold BPT,
 the pool's share token; traders exchange one pool token for another.
 
 These pages describe the `audit-fixes-excluded-SF` contract revision `96a2ee2`
-and SDK `@cubee_ee/sdk` source version **0.11.1**, revision `27de819`, checked on
+and SDK `@cubee_ee/sdk` source version **0.11.1**, revision `09cc776`, checked on
 **2026-09-07**. Some code identifiers still use the Cube name. See the
 [version and compatibility notes](technical/versions.md) before integrating.
 
@@ -36,6 +36,7 @@ Fees and depth do not guarantee an LP return or a particular market price.
 - [Max-selloff window](for-traders/max-selloff.md): snapshot cap, carryover and window changes.
 - [Pool controls](safety/pool-controls.md): authority roles, pauses and range-manager powers.
 - [SDK](sdk/index.md) and [SDK reference](sdk/reference.md): actual method names, arguments and return types.
+- [Read state and calculate a swap](sdk/state-and-quotes.md): every contract-to-SDK field mapping, config/Treasury reads, quote inputs and slippage output.
 - [Contract instruction reference](technical/instruction-reference.md): every on-chain instruction.
 - [Accounts and events](technical/accounts-events.md): storage layouts and indexing fields.
 

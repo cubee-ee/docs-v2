@@ -1,6 +1,6 @@
 # Pricing and Liquidity Math
 
-The pool uses a weighted constant-product AMM with virtual balances. This page specifies the implementation in contracts `audit-fixes-excluded-SF` at `96a2ee2` and its SDK `0.11.1` counterpart at `27de819`. Amounts in formulas are raw integer token units unless a human-unit price is explicitly shown.
+The pool uses a weighted constant-product AMM with virtual balances. This page specifies the implementation in contracts `audit-fixes-excluded-SF` at `96a2ee2` and its SDK `0.11.1` counterpart at `09cc776`. Amounts in formulas are raw integer token units unless a human-unit price is explicitly shown.
 
 ## State and numerical scales
 
@@ -86,6 +86,16 @@ The dynamic fee uses the gross-input selloff window, but is charged in output un
 
 Protocol-fee collection transfers the reserved amounts out of the vault and resets their counters. It does not decrease LP `actual_balance` or `virtual_balance`: those balances already excluded the protocol claim.
 
+### Selloff and surge are part of executable swap math
+
+The curve has no clock, but a complete quote does. The [limiter](../for-traders/max-selloff.md) first projects the input token's buckets using the transaction timestamp, resolves its snapshot-based cap, and accepts **gross** input against that cap. It returns `effective_before`, `effective_after` and `cap`. Base-fee subtraction does not reduce this window usage.
+
+The [surge calculation](../for-traders/dynamic-fee.md#how-the-charged-amount-is-calculated) then uses those three values to locate the taxed span. Its cumulative curve evaluations use `floor(curve_input × consumed_gross_input / gross_input)`. Four equal spans of taxed raw input each have an integrated average rate and an output-token ceiling charge. The sum is subtracted from gross curve output. The rate integral and four output segments are distinct operations; a single averaged rate times total output is not the implementation.
+
+The exact [integer primitive and averaging rules](../for-traders/dynamic-fee.md#integral-and-integer-precision) preserve every fill/normalization floor and rate/amount ceiling. The optional kink changes the primitive inside a segment; it does not change the number of output segments or force their boundaries onto the kink. Curve integration does not establish exact split-trade invariance once nonlinear output allocation, four segments, reserve changes and integer rounding are included.
+
+Use `CubicPoolClient.quoteSwap` for the combined path, or compose the public helpers as in the [executable local example](../for-traders/dynamic-fee.md#reproduce-the-partial-example-with-the-sdk). Neither `calcOutGivenIn` nor `calcSurgeFeePct` alone produces a valid net swap quote.
+
 ## Spot prices: specify the direction
 
 Ignoring fees and finite-trade price impact, the marginal **raw output per raw input** is:
@@ -105,7 +115,17 @@ These are reciprocals. The SDK's `calcSpotPrice` returns **input per output**, s
 
 For example, virtual reserves of 2 human input tokens and 10 human output tokens with equal weights imply 5 output per input, or 0.2 input per output. With input weight 80% and output weight 20%, those become 20 output per input and 0.05 input per output. Ignoring weights is valid only when those weights are equal.
 
-`quoteSwap.spotOut` uses input **after the base fee**. Its `priceImpactHbps` compares this spot output with net output **after surge**, so this SDK field includes the effect of surge as well as curve price impact. It is not a pure fee-free curve-impact metric.
+`quoteSwap.spotOut` uses input **after the base fee**. Its `priceImpactHbps` compares this spot output with net output **after surge**, so this SDK field includes the effect of surge as well as curve price impact. It is not a pure fee-free curve-impact metric:
+
+```text
+spot_out        = floor(x × V_out × w_in / (V_in × w_out))
+curve_impact    = floor((spot_out − Y) × 1,000,000 / spot_out)
+SDK_net_impact  = floor((spot_out − (Y − S)) × 1,000,000 / spot_out)
+```
+
+These impact expressions assume positive spot output and a nonnegative loss; the SDK returns zero for nonpositive spot output or output at least equal to spot. Impact scale is `1,000,000 = 100%`, unlike the `10,000` scale used for surge rate points.
+
+In the [partial-window worked example](../for-traders/dynamic-fee.md#worked-example-a-partial-trade-crossing-the-kink), `x = spot_out = 19,940,000`, `Y = 19,550,169`, and `S = 1,210,098` raw output units. Curve-only impact is `19,550 = 1.9550%`; the SDK field is `80,237 = 8.0237%`. The separate floors mean subtracting rounded displayed percentages is not an exact fee reconciliation.
 
 ## Seed deposit and initial BPT
 
@@ -193,5 +213,5 @@ minimum = floor(expected × (1,000,000 − slippage_hbps) / 1,000,000)
 - [Contract invariant](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/math/weighted_math.rs)
 - [Contract fixed-point power](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/math/log_exp_math.rs)
 - [Contract single-token allocation and cap](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/single-token-liquidity/src/math.rs)
-- [SDK math modules](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/math)
-- [SDK stateful quote math](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/clients/quote-math.ts)
+- [SDK math modules](https://github.com/coffer-so/sdk/tree/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/math)
+- [SDK stateful quote math](https://github.com/coffer-so/sdk/blob/09cc7766a1e865b5c3f9b97a0526a982671683f5/src/clients/quote-math.ts)
