@@ -1,170 +1,154 @@
 # Max-Selloff Window
 
-Every Cube pool can rate-limit how much of each token can be **sold INTO** the pool over a configurable time window. When a swap would push the rolling sum above the cap, the swap reverts with `MaxSelloffExceeded` and the user's funds stay put.
+A pool can limit how much of each token is **sold into the pool**. The limit is a percentage of a stored virtual-balance snapshot, enforced with two time buckets. A swap that exceeds it fails with `MaxSelloffExceeded`. This is separate from the [dynamic fee](dynamic-fee.md), which can increase the cost of an allowed swap as the same window fills.
 
-This page explains what the parameter is, how it's enforced on-chain, and how it should look from a trader's perspective.
+This page describes contracts `audit-fixes-excluded-SF` at `96a2ee2` and SDK `0.11.1` at `27de819`.
 
----
+## What is limited
 
-## TL;DR
+The input token's policy applies to the swap's **gross `amount_in`**, before the base swap fee. Buying that token as the output does not add to its selloff counters. The retained input-token portion of a single-token deposit does not count as a sale; each internal swap does, in execution order.
 
-- Each token has two on-chain fields: **`max_selloff`** (a cap, in raw token units) and **`max_selloff_period_length`** (a window in seconds).
-- The pool tracks a **sliding window** of how much of that token has been sold into the pool over the last `period` seconds.
-- A new swap is allowed only if the effective rolling sum (after adding `amount_in`) stays ≤ `max_selloff`.
-- `max_selloff = 0` → check is **disabled** for that token.
-- Set by `pool_admin` only (see [Pool Controls](../safety/pool-controls.md)).
+`max_selloff_pct` is an integer percentage with scale **10,000 = 100%**. For example, `1,000` means a cap of 10% of the snapshot. It is not an amount in raw token units. The resolved cap and counters are raw units of the input token:
 
----
-
-## Why this exists
-
-A weighted-product AMM with virtual liquidity is **very generous to one-sided flow**: if everyone wants to dump token X into the pool, the pool happily absorbs it — pricing X lower with every fill, eventually leaving the LP holding a bag of the dumping token at a curve-implied price well below market.
-
-`max_selloff` is a **circuit breaker** against this. The pool admin caps how fast each token can be dumped in, giving the range-manager (or external arbitrage) time to either rebalance or pause the pool before too much damage accrues.
-
-It is **not** a fee or a discouragement — once you hit the cap, you just can't trade that direction until the window slides forward enough.
-
----
-
-## How the math works
-
-The pool stores three numbers per token, updated atomically on every swap:
-
-| Field | Meaning |
-|---|---|
-| `previous_selloff` | Total `amount_in` accrued in the PREVIOUS window |
-| `current_selloff` | Total `amount_in` accrued in the CURRENT window so far |
-| `window_start_timestamp` | Unix-second the current window began |
-
-When a new swap arrives at time `now`:
-
-```
-elapsed = now − window_start_timestamp
+```text
+cap = floor(max_selloff_pct × selloff_vb_snapshot / 10,000)
 ```
 
-### Bucket rotation
+A virtual balance is a pricing reserve; it need not equal the actual token balance in the vault. The cap is consequently not a percentage of vault holdings, circulating supply, or dollar value. Output liquidity and price impact remain independent constraints.
 
-Before checking the cap, the pool decides whether the window has rolled over:
+- `max_selloff_pct = 0` disables both the window check and dynamic fee for that token. Its counters are not advanced by swaps while disabled.
+- `max_selloff_pct > 0` requires a positive period. The percentage cannot exceed `10,000`.
+- A small percentage and snapshot can resolve to a zero cap after flooring. Every positive sale then exceeds it.
+- Equality is accepted: the post-swap effective amount may equal the cap.
 
-| Condition | Action |
-|---|---|
-| `elapsed ≥ 2 × period` | Both buckets stale → wipe everything, start fresh at `now`. |
-| `elapsed ≥ period` | One boundary crossed → `previous := current`, `current := 0`, slide window by exactly one period. |
-| `elapsed < period` | No rotation. |
+## Stored state
 
-This is a Cloudflare-style sliding-window approximation (the same pattern Solend's rate limiter uses).
+Each token's `dynamics` row contains:
 
-### The cap check
+| Contract field | SDK `PoolTokenInfo` field | Meaning |
+|---|---|---|
+| `previous_selloff` | `previousSelloff` | Prior bucket's amount, possibly rescaled when its balance basis changes |
+| `current_selloff` | `currentSelloff` | Current bucket's accumulated gross inputs, possibly rescaled by LP actions |
+| `window_start_timestamp` | `windowStartTimestamp` | Start of the current bucket, Unix seconds |
+| `selloff_vb_snapshot` | `selloffVbSnapshot` | Virtual-balance basis used to resolve this window's cap |
 
-The "effective" amount on a given swap blends both buckets with a linear weight:
+The SDK exposes these four values as `BN`. The policy fields `maxSelloffPct` and `maxSelloffPeriodLength` are numbers. Read complete state with `CubicPoolClient.sync()` before quoting; do not infer the state only from a volume chart.
 
-```
-effective = previous × (period − elapsed_in_window) / period
-          + current
-          + amount_in
+## Rotation and acceptance
 
-require: effective ≤ max_selloff
-```
+The contract reads `Clock::unix_timestamp`. Compute `elapsed = max(0, now − window_start_timestamp)`; a backward clock movement never rotates a window backward.
 
-The linear weight on `previous` means old activity fades out smoothly across the new window — so you can't game the boundary by waiting until `00:00` to dump exactly `max_selloff`, then dumping another `max_selloff` at `00:01`. The early-window cap is the **combination** of leftover-previous + fresh-current.
+| Elapsed time | Candidate bucket update | Snapshot |
+|---|---|---|
+| Less than one period | Keep both buckets and their start | Keep the stored snapshot, unless zero, in which case capture the current pre-swap virtual balance |
+| At least one but less than two periods | Move `current` into `previous`, set `current = 0`, advance start by exactly one period | Capture the current pre-swap virtual balance |
+| At least two periods | Clear both buckets and set start to `now` | Capture the current pre-swap virtual balance |
 
-If `effective > max_selloff` the instruction reverts with `MaxSelloffExceeded` and **no state is mutated** — `dynamics` stays exactly as it was. Retry with a smaller `amount_in` or wait.
+When a rotation changes an initialized snapshot, the carryover is converted to the new basis:
 
-### After accept
-
-```
-current += amount_in
-```
-
-That's the only mutation. `previous` and `window_start_timestamp` only change during rotation.
-
----
-
-## Worked example
-
-Pool: 9-token, USDC/SOL/JTO/.../BONK. Admin sets for BONK:
-
-```
-max_selloff               = 1_000_000      (raw, BONK has 5 decimals → 10 BONK)
-max_selloff_period_length = 3600           (1-hour window)
+```text
+previous = floor(candidate_previous × new_snapshot / old_snapshot)
 ```
 
-| t | swap | effective calc | accept? | state after |
-|---|---|---|---|---|
-| 0 | — | — | (init) | `prev=0 curr=0 ws=0` |
-| 10s | sell 5 BONK in (`5_000_000` raw) | `0·… + 0 + 5_000_000 = 5_000_000` | ❌ over 1M | unchanged |
-| 10s | sell 0.5 BONK in (`500_000`) | `0·… + 0 + 500_000 = 500_000` | ✅ | `curr=500_000` |
-| 1800s | sell 0.4 BONK in (`400_000`) | `0 + 500_000 + 400_000 = 900_000` | ✅ | `curr=900_000` |
-| 3700s | sell 0.5 BONK in | elapsed=3700>3600 → rotate: `prev=900_000 curr=0 ws=3600`<br>elapsed_in_window=100<br>`weighted_prev = 900_000 × (3600−100)/3600 = 875_000`<br>`effective = 875_000 + 0 + 500_000 = 1_375_000` | ❌ over 1M | unchanged |
-| 10000s | sell 0.5 BONK in | elapsed=10000 > 2×3600 → hard reset, `ws=10000`<br>`effective = 500_000` | ✅ | `prev=0 curr=500_000 ws=10000` |
+After the candidate rotation, let `e` be elapsed time within the new current bucket:
 
----
+```text
+weighted_previous = floor(previous × (period − e) / period)
+effective_before  = weighted_previous + current
+effective_after   = effective_before + gross_amount_in
 
-## What a trader sees
-
-If your swap would push the pool over the cap, the wallet shows a simulation error:
-
-```
-Transaction simulation failed: Error processing Instruction N: custom program error: 0x???
-… Program log: AnchorError caused by account: pool. Error Code: MaxSelloffExceeded.
+require effective_after <= cap
 ```
 
-(The SDK and frontend translate this into "Max-selloff window exceeded for &lt;TICKER&gt;. Try a smaller amount or wait for the window to roll forward.")
+Only on acceptance are the new buckets, timestamp and snapshot stored, with `current += gross_amount_in`. A rejected check commits none of its candidate changes. If a later fee, liquidity, slippage or token-transfer check fails, Solana transaction atomicity also rolls back the window update.
 
-### How to react
+This is a **two-bucket approximation**, not an exact record of every sale in the preceding `period` seconds. The previous bucket fades linearly; the current bucket does not decay until it becomes the previous one. One full period without a new sale therefore does not guarantee an entirely empty limiter. Two periods from the stored bucket start make both buckets stale, absent further successful updates.
 
-1. **Retry with smaller `amount_in`.** Compute headroom = `max_selloff − effective(before your amount_in)`. The pool exposes `previous_selloff`, `current_selloff`, and `window_start_timestamp` on-chain so you (or your bot) can pre-compute this.
-2. **Wait.** As time passes, `weighted_prev` shrinks linearly. After exactly one full period the previous window has fully aged out and you regain full headroom (minus whatever has accumulated in the new `current`).
-3. **Split across a different pool.** Cube's [Swap Routing](../integration/swap-routing.md) backend will automatically route around a capped pool when picking a multi-hop path.
+## Why the snapshot changes
 
-### How to estimate the cap before submitting
+Within a window, ordinary swaps do not continuously enlarge the cap as the input virtual balance grows. The stored basis stays fixed until rotation. Buying the token can shrink its live virtual balance without changing the snapshot until the next rotation.
+
+Proportional **add/remove liquidity** are handled differently. The contract scales the snapshot and both counters together with the liquidity ratio, keeping the fraction of capacity used approximately unchanged, subject to integer rounding:
+
+```text
+add:    value_new = value + floor(value × ratio_fp / 10^18)
+remove: value_new = value − floor(value × ratio_fp / 10^18)
+```
+
+Here `value` is each of `selloff_vb_snapshot`, `previous_selloff` and `current_selloff`; the timestamp is unchanged. This applies only to tokens whose cap is enabled. Scaling both capacity and usage prevents adding then withdrawing liquidity from leaving an artificially large cap behind. A seed deposit does not run this proportional rescaling path.
+
+Administrative virtual-balance changes do not call this LP rescaling helper. The new live basis is captured on a later window rotation, with the carryover conversion above. Policy changes also preserve the existing window state.
+
+## Worked example: crossing a boundary
+
+Token X has 6 decimals. Initially:
+
+```text
+max_selloff_pct = 1,000          # 10%
+period = 60 seconds
+snapshot = 1,000,000,000 raw    # 1,000 X
+cap = 100,000,000 raw           # 100 X
+previous = 0; current = 80,000,000; start = 0
+```
+
+At `t = 30`, before any rotation, another 20 X is allowed and 20.000001 X is not. The current bucket's 80 X has not decayed just because half its period has passed.
+
+For a separate boundary example, keep the original 80 X current bucket. At `t = 90`, assume the live virtual balance is now 1,200 X:
+
+1. Rotate once: `start = 60`, candidate previous = 80 X, current = 0.
+2. Capture 1,200 X and rebase previous: `80 × 1,200 / 1,000 = 96 X`.
+3. Cap becomes 120 X. Half the new period has elapsed, so weighted previous is `96 × 30 / 60 = 48 X`.
+4. Headroom is `120 − 48 = 72 X`. A sale of 72 X reaches the cap exactly; a larger sale fails.
+
+For an LP rescaling example, a 50% proportional liquidity removal from an initialized window with snapshot 1,000 X and current usage 80 X produces snapshot 500 X and current usage 40 X. The cap falls from 100 X to 50 X; the used fraction remains 80%, before rounding effects.
+
+## Quoting in the SDK
+
+`quoteSwap` runs the limiter, dynamic fee and AMM math together. It uses the chain timestamp fetched by `sync()` unless an explicit `nowSeconds` argument is supplied. It does not advance the public cache when quoting. Another trade, a policy change or the eventual execution timestamp can change the result.
+
+For a separate headroom calculation, the exported helper performs the same rotation and rebasing. This example assumes an already synchronized `pool` of type `PoolInfo`:
 
 ```typescript
-const pool = await client.sync();
-const slot = pool.data.tokens[tokenInIndex];
-const cap = slot.maxSelloff;
-const period = slot.maxSelloffPeriodLength;
-if (cap === 0n) return; // disabled — no limit
+import { checkAndAdvanceSelloff } from "@cubee_ee/sdk";
 
-const now = Math.floor(Date.now() / 1000);
-const elapsed = Math.max(0, now − slot.windowStartTimestamp);
-let prev = slot.previousSelloff;
-let curr = slot.currentSelloff;
-let elapsedInWindow = elapsed;
-if (elapsed >= 2 * period) { prev = 0n; curr = 0n; elapsedInWindow = 0; }
-else if (elapsed >= period) {
-  prev = curr; curr = 0n;
-  elapsedInWindow = elapsed − period;
-}
-const weightedPrev = (prev * BigInt(period − elapsedInWindow)) / BigInt(period);
-const headroom = cap − (weightedPrev + curr);
+const token = pool.tokens[tokenInIndex];
+if (pool.chainTimestamp === undefined) throw new Error("Sync the pool first");
+if (token.maxSelloffPct > 0 && (
+  token.maxSelloffPeriodLength === undefined || !token.previousSelloff ||
+  !token.currentSelloff || !token.windowStartTimestamp || !token.selloffVbSnapshot
+)) throw new Error("Missing selloff state");
+
+const observed = checkAndAdvanceSelloff({
+  state: {
+    previousSelloff: BigInt(token.previousSelloff?.toString() ?? "0"),
+    currentSelloff: BigInt(token.currentSelloff?.toString() ?? "0"),
+    windowStartTimestamp: BigInt(token.windowStartTimestamp?.toString() ?? "0"),
+    selloffVbSnapshot: BigInt(token.selloffVbSnapshot?.toString() ?? "0"),
+  },
+  maxSelloffPct: token.maxSelloffPct,
+  period: token.maxSelloffPeriodLength ?? 0,
+  amountIn: 0n, // Helper calculation only; an actual zero-input swap is invalid.
+  virtualBalance: BigInt(token.virtualBalance.toString()),
+  now: BigInt(pool.chainTimestamp),
+});
+
+const headroom = observed === null
+  ? null // Disabled; this does not mean unlimited output liquidity.
+  : observed.maxSelloffCap - observed.effectiveSelloffBefore;
 ```
 
----
+The helper throws `MaxSelloffExceeded` if the already-used amount exceeds a newly tightened cap, even for this zero-input calculation. No positive sale fits at that timestamp. Do not replace the check with `percentage × live_virtual_balance`, or assume missing counters are zero for an enabled policy.
 
-## Configuration (admin side)
+## Configuration and events
 
-Pool admin sets per-token caps via `set_max_selloff` on the cubic-pool program:
+The pool admin calls `set_max_selloff(params: Vec<SelloffParams>)` with one complete entry for every token slot in pool order, including sidelined slots. The old two-vector raw-amount API is obsolete. See [Dynamic Fee: policy fields](dynamic-fee.md#policy-fields-and-units) for all seven fields, bounds and the SDK builder.
 
-```rust
-set_max_selloff(
-    ctx: Context<SetMaxSelloff>,
-    max_selloffs: Vec<u64>,    // length = token_count, in RAW units
-    period_lengths: Vec<u32>,  // length = token_count, seconds
-)
-```
+Changing the percentage or period **does not reset counters or the snapshot**. A smaller cap can block further sells immediately. A new period is applied to the existing timestamp on the next check. Disabling and later re-enabling also does not itself clear old state; rotation determines whether it is stale. The setter is pool-admin-only, and a renounced pool admin cannot use it.
 
-Both vectors must be exactly `token_count` long — sparse updates are not supported. To leave a token unchanged, pass its current values. `max_selloff = 0` disables the check for that slot (period is ignored).
+A successful swap with an enabled window emits `MaxSelloffWindowAdvanced`: pool, input token index, effective amount including the swap, resolved cap, snapshot, both buckets, bucket start and transaction timestamp. It is absent when the limiter is disabled. `MaxSelloffSet` describes a policy update, but its current event layout omits the mid-rate and kink fields; read the pool account for the complete policy. LP rescaling does not emit `MaxSelloffWindowAdvanced`.
 
-Frontend exposes this as a form on **Admin panel → Set max-selloff window**. Inputs are in **human units** (e.g. "10" BONK), the page converts to raw `u64` via `10^decimals` before sending.
+## Sources
 
-See [Pool Controls](../safety/pool-controls.md#set-max-selloff-window) for the full admin UI walkthrough.
-
----
-
-## Reference
-
-- Implementation + tests: `programs/cubic-pool/src/math/max_selloff.rs`
-- Set instruction: `programs/cubic-pool/src/instructions/set_max_selloff.rs`
-- Event: `MaxSelloffWindowAdvanced` — emitted on every swap that passed the check, carrying the new effective state. Use for monitoring dashboards.
-- Error: `MaxSelloffExceeded` (Anchor code defined in `programs/cubic-pool/src/errors.rs`).
+- [Contract limiter and LP rescaling](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/math/max_selloff.rs)
+- [Policy instruction and validation](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/set_max_selloff.rs)
+- [SDK limiter](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/math/maxSelloff.ts)

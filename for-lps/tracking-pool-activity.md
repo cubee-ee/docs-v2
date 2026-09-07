@@ -1,254 +1,134 @@
-# Tracking Pool Activity
+# Tracking pool activity
 
-This page describes how to monitor a Cube pool's state, performance, and activity.
+Use account reads for authoritative current state, confirmed transaction logs
+for historical changes, and the backend for indexed/valued views. They have
+different completeness and freshness guarantees.
 
----
-
-## On-Chain Pool State
-
-### Reading Pool Data
-
-Use the `get_pool_info` instruction with transaction simulation to read all pool state without modifying it:
+## Read the full v5 state
 
 ```typescript
-const tx = await program.methods.getPoolInfo()
-  .accounts({ pool: poolPubkey })
-  .simulate();
-// Parse PoolInfo event from tx.events
+import { PublicKey } from "@solana/web3.js";
+import { CubicPoolClient, getConfig } from "@cubee_ee/sdk";
+
+async function readPool(poolAddress: PublicKey) {
+  const client = new CubicPoolClient({ config: getConfig("mainnet"), poolAddress });
+  const result = await client.sync();
+  if (!result.ok) throw new Error(result.error.humanMessage);
+  return result.data;
+}
 ```
 
-The `PoolInfo` event contains:
+`sync()` verifies the pool owner, decodes its state, reads the BPT mint and
+reserve-token mints, and includes the Solana Clock timestamp. The result exposes
+balances, weights, token activation, all seven selloff-policy values, both
+window buckets, the window timestamp/snapshot, pool admin, range-manager state,
+leverage limits, banned-extension snapshot, ALT, BPT supply and token programs.
+The pool read and subsequent mint/Clock reads are separate RPC requests; do not
+assume all returned accounts were read at one atomic slot.
 
-| Field | Type | Description |
-|---|---|---|
-| `pool` | `Pubkey` | Pool address |
-| `config` | `Pubkey` | Config address |
-| `bpt_mint` | `Pubkey` | BPT mint address |
-| `token_count` | `u8` | Number of tokens (2–9 via UI/SDK; 10 supported on-chain) |
-| `pool_id` | `u64` | Pool identifier |
-| `tokens` | `Vec<Pubkey>` | Token mint addresses |
-| `token_vaults` | `Vec<Pubkey>` | Vault addresses (derived as ATA(pool, mint, token_program)) |
-| `normalized_weights` | `Vec<u64>` | Weights in basis points (sum = 10000) |
-| `virtual_balances` | `Vec<u64>` | Virtual balances |
-| `actual_balances` | `Vec<u64>` | Actual balances |
-| `protocol_fees_owed` | `Vec<u64>` | Uncollected protocol fees |
-| `swap_fee_rate` | `u32` | Swap fee rate (hundredths of bps) |
-| `protocol_fee_rate` | `u16` | Protocol fee share (bps) |
-| `pool_enabled` | `bool` | Master kill switch |
-| `swaps_enabled` | `bool` | Per-pool swap toggle |
-| `token_programs` | `Vec<Pubkey>` | Per-token program IDs (SPL or Token-2022) |
+The pool layout is **1,683 bytes**, including its Anchor discriminator.
+V5 reuses reserved space in the previous 1,683-byte layout. SDK decoding rejects
+legacy 1,154-byte v3 accounts; `migrate_to_v5` is not a v3 reallocation path.
+Complete field offsets/types are in [Accounts and events](../technical/accounts-events.md).
 
-### Direct Account Deserialization
+For a lower-level reader, `decodePoolAccount` exposes the SDK's camelCase raw
+fields, while `decodeContractAccount("cubicPool", "CubicPool", data)` preserves
+the IDL names and fixed arrays. Verify ownership before using a standalone
+parser. Slots beyond `token_count` are not live pool tokens.
 
-The `CubicPool` account is **1683 bytes (v4 AoS layout)**. Older v3 pools (1154 bytes, parallel arrays) are migrated via `migrate_pool_v4` — read the in-tree `programs/cubic-pool/src/instructions/migrate_pool_v4.rs` if you encounter one.
+## `get_pool_info` is a partial event view
 
-**Top-level layout (1683 bytes):**
+This read-only instruction emits a `PoolInfo` event and can be simulated. It
+reports composition, derived vaults/BPT mint, balances, fees, enabled flags and
+timestamp. It does **not** include every newer account field: for example,
+selloff policy/window state, banned extensions, admin/range-manager settings,
+ALT and BPT total supply require account reads.
 
-| Offset | Field | Size | Type |
-|---|---|---|---|
-| 0–7 | discriminator | 8 | `[u8; 8]` |
-| 8–39 | `config` | 32 | `Pubkey` |
-| 40 | `bump` | 1 | `u8` |
-| 41 | `token_count` | 1 | `u8` |
-| 42–49 | `pool_id` | 8 | `u64` |
-| 50–53 | `swap_fee_rate` | 4 | `u32` (hundredths of bps) |
-| 54–55 | `protocol_fee_rate` | 2 | `u16` (bps) |
-| 56–63 | `created_at` | 8 | `i64` (unix sec) |
-| 64 | `pool_enabled` | 1 | `bool` (master kill — protocol-admin only) |
-| 65 | `swaps_enabled` | 1 | `bool` (per-pool toggle) |
-| 66–97 | `pool_admin` | 32 | `Pubkey` |
-| 98–129 | `pending_pool_admin` | 32 | `Pubkey` (`default` = no transfer pending) |
-| 130–161 | `range_manager` | 32 | `Pubkey` (`default` = no manager set) |
-| 162 | `range_manager_enabled` | 1 | `bool` |
-| 163–164 | `range_manager_max_vb_change_bps` | 2 | `u16` (≤ 10 000) |
-| 165–166 | `range_manager_max_weight_change_bps` | 2 | `u16` (≤ 10 000) |
-| 167–170 | `range_manager_min_update_interval_secs` | 4 | `u32` |
-| 171–178 | `range_manager_last_updated` | 8 | `i64` |
-| 179–1618 | `tokens` | 1440 | `[TokenSlot; 10]` (see below) |
-| 1619–1650 | `lookup_table` | 32 | `Pubkey` (`default` = ALT not provisioned) |
-| 1651–1682 | `reserved` | 32 | `[u8; 32]` |
+Its named account is just `pool`, with no instruction signer; simulation still
+needs a valid transaction context. The emitted data is an event, not a typed
+return value from this particular instruction.
 
-**`TokenSlot` is 144 bytes**, packed as `config: AssetConfig (88) + dynamics: AssetDynamics (56)`. Slots past `token_count` are zero-padded — ignore them.
+## Indexing transaction events
 
-**`AssetConfig` (88 bytes) — admin-controlled, rarely changes:**
+The SDK exposes all 60 declared events across the three programs. Prefer
+`parseContractEvents(logs)` for exact IDL field names and BN integers, or the
+existing `parseCubicPoolEvents` compatibility API for camelCase event fields.
 
-| Offset (relative) | Field | Size | Type |
-|---|---|---|---|
-| 0–31 | `mint` | 32 | `Pubkey` |
-| 32–63 | `token_program` | 32 | `Pubkey` |
-| 64–71 | `normalized_weight` | 8 | `u64` (basis points) |
-| 72–79 | `max_selloff` | 8 | `u64` (raw token units, `0` = disabled — see [Max-Selloff Window](../for-traders/max-selloff.md)) |
-| 80–83 | `max_selloff_period_length` | 4 | `u32` (seconds) |
-| 84–87 | `reserved` | 4 | `[u8; 4]` |
+| Event | Relevant meaning |
+| --- | --- |
+| `Swap` | Input, net user output, input base/protocol fee, output surge fee, user/pool and timestamp |
+| `LiquidityAdded` | Actual deposited amounts and BPT minted |
+| `LiquidityRemoved` | Actual output amounts and effective BPT burned after the supply floor |
+| `PoolStateLog` | Pool address, actual/virtual/fee vectors and timestamp |
+| `MaxSelloffWindowAdvanced` | State emitted when a capped input swap advances the limiter successfully |
+| `MaxSelloffSet` | Policy update; read the account for all fields, including mid slope/kink |
+| Range-manager/admin events | Authority and configuration changes; fields differ by event |
+| `SingleTokenDeposit` | Final helper-deposit summary alongside the internal swap/join logs |
 
-**`AssetDynamics` (56 bytes) — auto-updated by user txs:**
+`PoolStateLog` is emitted by swap, add and remove; it is not emitted by every
+administrative action and is not a complete pool-account snapshot. It does not
+carry BPT supply. Read the mint and pool accounts for fields absent from events.
 
-| Offset (relative) | Field | Size | Type |
-|---|---|---|---|
-| 0–7 | `virtual_balance` | 8 | `u64` (raw units) |
-| 8–15 | `actual_balance` | 8 | `u64` (raw units, mirrors vault) |
-| 16–23 | `protocol_fees_owed` | 8 | `u64` (uncollected, awaits `collect_protocol_fees`) |
-| 24–31 | `previous_selloff` | 8 | `u64` |
-| 32–39 | `current_selloff` | 8 | `u64` |
-| 40–47 | `window_start_timestamp` | 8 | `i64` |
-| 48–55 | `reserved` | 8 | `[u8; 8]` |
+Before applying indexed state:
 
-For the i-th token (`0 ≤ i < token_count`):
+1. Verify transaction success (`meta.err == null`) at the chosen commitment.
+2. Attribute log payloads to the actual invoking program, including nested CPIs.
+   Matching an event discriminator alone does not authenticate the emitter.
+3. Preserve transaction/instruction ordering and make ingestion idempotent.
+4. Treat a helper deposit as one user action with internal swap/join events;
+   avoid double-counting its deposit, fees or BPT.
+5. Reconcile gaps with account reads. Failed transactions may contain logs but
+   their attempted pool changes did not commit.
 
-```
-slot_offset  = 179 + i * 144
-config_off   = slot_offset
-dynamics_off = slot_offset + 88
+## Balance and value checks
+
+Normal supported settlement accounts for the vault as
+`actual_balance + protocol_fees_owed`. Actual is already the LP portion.
+Unexpected vault excess can be an external donation; it does not automatically
+increase the recorded LP claim. A deficit or inconsistent token-program owner
+requires investigation, not silently rewriting the SDK snapshot.
+
+With external token prices `price[i]` in USD per whole token:
+
+```text
+LP TVL       = sum(actual[i] / 10^decimals[i] * price[i])
+virtual TVL  = sum(virtual[i] / 10^decimals[i] * price[i])
+position USD = rawUserBpt / rawBptSupply * LP TVL
 ```
 
-The struct definitions live in `programs/cubic-pool/src/state/cubic_pool.rs` — that file is the source of truth, this table is mechanically derived from it.
+Virtual TVL is pricing depth, not additional inventory. Position value is a
+valuation of a share; actual withdrawal still applies integer rounding and the
+minimum remaining BPT supply. Price-source coverage and freshness matter.
 
----
+For an infinitesimal fee-free exchange, the spot quote in **whole output tokens
+per one whole input token** is:
 
-## Backend API Monitoring
-
-> 🔐 **API access requires a key.** The endpoints below are gated. To get a key, reach out:
->
-> - Telegram chat: **[@cubee\_chat](https://t.me/cubee_chat)**
-> - Direct: **[@sepezho](https://t.me/sepezho)**
-
-The Cube backend API is available at `https://api.cubee.ee`.
-
-### Pool Details
-
-```
-GET https://api.cubee.ee/api/pools/:address
+```text
+outPerIn = (virtualOut * weightIn) / (virtualIn * weightOut)
+           * 10^(decimalsIn - decimalsOut)
 ```
 
-Returns the pool with all tokens, balances, weights, fees, TVL, **virtual TVL**, volume, APY, range-manager config, and per-token `max_selloff` settings.
+The reciprocal is input per output. Do not invert the label accidentally, or
+use a raw balance ratio without weights/decimal conversion. Executable quotes
+also include curve impact, base/surge fees and state checks.
 
-### Pool Transactions
+For positive actual balances, `leverage = virtual / actual`; SDK `concentration`
+is the inverse. A zero actual balance makes leverage undefined rather than
+zero. Track these alongside weights, manager permissions, activation flags and
+window capacity when evaluating a pool.
 
-```
-GET https://api.cubee.ee/api/pools/:address/transactions?limit=50&offset=0&user=<wallet>
-```
+## Backend metrics
 
-Returns recent transactions (swaps, adds, removes) with full event data. Filterable by user wallet.
+`CubeBackendClient` has methods for pool details, transaction history, transaction
+counts, platform stats, time-series statistics and portfolio views. See the
+[API reference](../integration/api-reference.md) for exact routes, response
+envelopes and which methods the checked backend implements.
 
-### Transaction Stats
+The backend's pricing, cache and indexing jobs are not atomic on-chain state.
+Check response timestamps and missing values. Do not use an API TVL value as the
+raw reserve input to SDK swap or liquidity math. Its fields named `apy` are
+simple annualizations in the checked revision; see [fee income](how-yield-is-generated.md).
 
-```
-GET https://api.cubee.ee/api/pools/:address/tx-stats
-```
-
-Returns `{ totalCount, count24h }` — total and 24-hour transaction counts.
-
-### Platform Stats
-
-```
-GET https://api.cubee.ee/api/pools/stats
-```
-
-Returns `{ totalTvlUsd, totalVirtualTvl, poolCount, updatedAt }`.
-
-See the full [API Reference](../integration/api-reference.md) for every endpoint, request format, and response shape.
-
----
-
-## Key Metrics
-
-### Spot Price
-
-The instantaneous price between two tokens, using the contract's
-`WeightedMath::calc_spot_price` formula. **This is NOT just
-`vbIn / vbOut`** — that ignores weights and is wrong for non-50/50
-pools.
-
-```
-spotPrice(in → out) = (vbIn / wIn) / (vbOut / wOut)
-                    × 10^(decimalsOut − decimalsIn)
-```
-
-Where `vbIn`/`vbOut` are `virtual_balance` (raw `u64`), `wIn`/`wOut`
-are `normalized_weight` (bps, sum = 10 000). The decimal correction
-converts the raw-unit ratio into human-readable "out per 1 in".
-
-Reference: `programs/cubic-pool/src/math/mod.rs` → `WeightedMath::calc_spot_price`. The SDK exposes this as `CubicPoolClient.quoteSwap(...)` — prefer the SDK over re-implementing.
-
-### Leverage Ratio
-
-Per-token leverage, showing how much "depth concentration" is applied:
-
-```
-leverage[i] = virtual_balance[i] / actual_balance[i]
-```
-
-`leverage = 1.0` means the AMM curve treats the pool exactly as the
-vault holds. `leverage > 1` widens the quote (lower slippage for the
-same actual depth). `leverage < 1` is allowed but tightens the curve
-(very high slippage per dollar of actual reserves).
-
-If leverage drifts significantly from the initial setting, it
-indicates large unidirectional trading that hasn't been rebalanced
-by the range-manager.
-
-### BPT Value
-
-The value of your LP position:
-
-```
-your_value = (your_bpt / bpt_total_supply) × sum(actual_balance[i] × token_price[i])
-```
-
-BPT supply and pool balances can be read on-chain or from the backend API.
-
-### TVL (Total Value Locked)
-
-The USD value of all actual balances in the pool. Updated periodically by the backend using prices from Pyth (where available) and pool spot prices (for tokens without a Pyth feed).
-
-### Virtual TVL
-
-`Σ (virtual_balance[i] × token_price[i])`. Differs from TVL by per-token leverage; surfaced separately so LPs can see the **AMM-curve depth**, not just the underlying asset value. Available via the `virtualTvlUsd` field on the pool API response (and the stats panel on the pool page).
-
-### Volume (24h)
-
-Trading volume over the last 24 hours, derived from on-chain transaction data indexed by the backend.
-
-### APY
-
-Annualised yield based on recent fee revenue:
-
-```
-daily_yield = (volume_24h × swap_fee_rate × (1 − protocol_fee_rate)) / tvl
-apy = (1 + daily_yield) ^ 365 − 1
-```
-
----
-
-## Pool Status Flags
-
-| Flag | When `false` | Effect |
-|---|---|---|
-| `pool_enabled` | Pool disabled | All operations blocked. Only `protocol_admin` can flip. |
-| `swaps_enabled` | Swaps paused | Only swaps blocked; add/remove still work. Either `pool_admin` or `protocol_admin` can flip. |
-| `range_manager_enabled` | Range-manager disabled | `range_manager_update` reverts even if the pubkey is set. Pool-admin only. |
-
-All readable on-chain and returned by the backend API.
-
----
-
-## Events for Indexing
-
-Every pool operation emits a `PoolStateLog` event containing the full pool state snapshot. The backend transaction parser monitors these events to maintain an accurate off-chain index of pool state.
-
-| Event | Trigger |
-|---|---|
-| `Swap` | Every swap |
-| `LiquidityAdded` | Every deposit |
-| `LiquidityRemoved` | Every withdrawal |
-| `PoolStateLog` | Every operation (companion event) |
-| `SwapFeeRateUpdated` | `set_swap_fee_rate` |
-| `ProtocolFeeRateUpdated` | `set_protocol_fee_rate` |
-| `PoolEnabledUpdated` | `set_pool_enabled` |
-| `SwapsEnabledUpdated` | `set_swaps_enabled` |
-| `MaxSelloffSet` | `set_max_selloff` |
-| `RangeManagerSet` | `set_range_manager` |
-| `RangeManagerConfigSet` | `set_range_manager_config` |
-| `RangeManagerUpdated` | `range_manager_update` |
-| `MaxSelloffWindowAdvanced` | Companion to `Swap` when a max-selloff check passed (sliding-window state shifted) |
-| `ProtocolFeesCollected` | `collect_protocol_fees` |
+Sources: [event definitions](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/events.rs),
+[get_pool_info](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/get_pool_info.rs),
+[SDK parsers](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/parsers).

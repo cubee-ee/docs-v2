@@ -1,125 +1,57 @@
 # Smart Contracts
 
-Reference for the parts of the Cube on-chain programs that
-integrators (AMM bots, swap aggregators, indexers) need to interact
-with.
+This reference describes contracts [`audit-fixes-excluded-SF` at `96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs) and SDK [`0.11.1` at `27de819`](https://github.com/coffer-so/sdk/tree/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src). Defaults below are values written by this code; an existing account may contain different settings.
 
-The full Anchor IDL is published alongside the DefiLlama TVL adapter
-and contains every instruction discriminator, account layout, and
-event the program emits — use that as the source of truth for code
-generation.
+## Programs and deployment
 
----
-
-## Program IDs (mainnet)
-
-| Program | ID | Status |
+| Program | Mainnet address | Responsibility |
 | --- | --- | --- |
-| Cubic Pool | `8iQtGj9mcUfFUGaiCpPy89swC3s8YTC8FhVZWfgeZhwu` | Deployed |
-| Protocol Fees Authority | `3jiojHZbjJQ7QLMGSTjFwxVEmx4NtuRy34nLAmsJME81` | Deployed |
-| Single Token Liquidity | `7BpdUH1tzTSXLuQNo6YpjJ8Eagw8AkrS6cnkxiJdCFS2` | Devnet only |
+| `cubic_pool` | `8iQtGj9mcUfFUGaiCpPy89swC3s8YTC8FhVZWfgeZhwu` | Pool creation, weighted swaps, BPT liquidity, per-pool controls and config governance |
+| `protocol_admin` | `3jiojHZbjJQ7QLMGSTjFwxVEmx4NtuRy34nLAmsJME81` | Treasury, protocol authority, supervisor, program upgrades and administrative CPI wrappers |
+| `single_token_liquidity` | `7BpdUH1tzTSXLuQNo6YpjJ8Eagw8AkrS6cnkxiJdCFS2` | Atomic single-token deposit through swaps and a proportional join |
 
----
+All three were deployed and checked during the 2026-09-07 mainnet rollout. Their upgrade authority at that verification was Treasury PDA `B4gyhrqLzX36VEu54ShqgTkb4TpXooTdxtcmvER3d3Bg`, derived from `["treasury"]` under `protocol_admin`. Program addresses do not prove that the binary or authority is unchanged: re-read ProgramData when performing a later deployment review.
 
-## What integrators interact with
+The interface has **59 instructions**: 28 in Cubic Pool, 29 in Protocol Admin, and 2 in Single Token Liquidity. The [instruction reference](instruction-reference.md) lists every argument, fixed account and required remaining-account layout. The [accounts and events reference](accounts-events.md) lists stored fields and all 60 event schemas. The SDK ships these three IDLs; it is not necessary to obtain them from a TVL adapter.
 
-Only three instructions are relevant for routing / aggregation:
+## Public operations
 
-- `swap` — execute a swap
-- `add_liquidity` — proportional deposit (LP-facing, useful for vault integrations)
-- `remove_liquidity` — proportional withdrawal
+`initialize_cubic_pool` is permissionless under an existing config. Its payer becomes that pool's admin. It creates the pool account and BPT mint, with zero actual reserves; it does not supply liquidity. The current pool admin performs the seed deposit through `add_liquidity`. Config creation itself requires the Treasury's authorized CPI.
 
-All other instructions are governance / admin operations gated by the
-treasury PDA and are not callable by integrators.
+`swap` takes exact gross input and a minimum net output. It validates both token indices, mints, token programs, vault addresses and user accounts. Pool trading must be enabled and the input token must be active. It advances the input token's selloff window using gross input, calculates the base input fee, prices the post-base-fee input against virtual balances, and deducts any surge fee from output. Output cannot exceed the LP-owned actual reserve. The complete rounding and fee sequence is in [math](math.md), [swapping](../for-traders/swapping.md), and [max-selloff](../for-traders/max-selloff.md).
 
----
+`add_liquidity` has two modes. At zero BPT supply, only the non-renounced pool admin may seed it; at least one input is nonzero, and initial BPT is calculated from virtual balances and weights. Later deposits are proportional: `token_amounts` are ceilings, excess stays in the wallet, and every live slot must have a positive ceiling. A zero-reserve slot takes zero and can become live through a later swap into that token. The current SDK rejects joins where a live token's actual transfer rounds to zero; this is a conservative client check and is not a replacement for contract enforcement. See [liquidity](../for-lps/liquidity.md).
 
-## `swap`
+`remove_liquidity` burns BPT and returns a proportional basket of LP-owned actual reserves. The effective burn is capped so supply remains at least 1,000 raw BPT (0.000001 BPT at 9 decimals). The unused portion of the requested burn stays in the user's account; minimum token outputs apply to the effective burn. LP operations require `pool_enabled`, but do not require `swaps_enabled` or each token's input-active flag.
 
-Executes a swap on a single pool.
+`deposit_single_token` is a separate program, now available on mainnet. For an already seeded pool it receives one token, swaps allocated portions in pool order, joins using the resulting basket, returns newly minted BPT and refunds token dust. The final positive `minimum_bpt_amount` protects the whole atomic operation. Internal swaps use zero per-leg minimum and apply the same base fee, surge fee, selloff limiter and input-token gate as direct swaps. See [single-token deposits](../sdk/single-token-deposit.md).
 
-```rust
-pub fn swap(
-    ctx: Context<Swap>,
-    amount_in: u64,
-    minimum_amount_out: u64,
-    token_in_index: u8,
-    token_out_index: u8,
-) -> Result<()>
+## Accounting and token programs
+
+For each token, `actual_balance` is the **LP-owned** reserve, while `protocol_fees_owed` is separate. Under normal operation without unsolicited transfers or issuer-side balance changes:
+
+```text
+vault token amount = actual_balance + protocol_fees_owed
 ```
 
-| Argument | Description |
-| --- | --- |
-| `amount_in` | Input amount in native token units |
-| `minimum_amount_out` | Slippage floor — transaction reverts if output would be less |
-| `token_in_index` / `token_out_index` | 0-based indices into the pool's token list |
+Do not subtract protocol fees from `actual_balance` a second time. Collecting protocol fees transfers only the owed amount and clears that counter; it does not reduce actual or virtual balances. Direct transfers to vaults do not mint BPT or update these counters.
 
-### Accounts
+Pool asset mints can belong to classic SPL Token or Token-2022, independently per slot. The BPT mint also has its own token-program owner. Derive ATAs with the correct token program instead of assuming classic SPL Token. Creation-time extension admission and runtime transfer support are separate questions; the SDK conservatively rejects unsupported transfer paths. See [token policy](../safety/pool-controls.md#token-extension-policy).
 
-| Name | Notes |
-| --- | --- |
-| `pool` (mut) | The pool PDA |
-| `token_mint_in` / `token_mint_out` | Must match the pool's token at the given index |
-| `user_token_account_in` (mut) / `user_token_account_out` (mut) | Standard token accounts owned by the user |
-| `vault_in` (mut) / `vault_out` (mut) | ATA of the pool over the corresponding mint and token program |
-| `user` (signer) | Trader / router |
-| `token_program_in` / `token_program_out` | SPL Token or Token-2022, matching each side's mint |
+## Authority boundaries
 
-`vault_in` and `vault_out` are deterministically derived as
-`ATA(pool, mint, token_program)`. The token program for each side is
-stored on the pool account; read it before composing the transaction.
+Pool admins, the range manager, the config's protocol authority, Treasury admin and supervisor are distinct roles. A pool creator is not automatically a Treasury admin, and Treasury PDA ownership does not imply a multisig. A wallet signs an outer Protocol Admin instruction; that program authorizes the signer and makes the Treasury PDA sign the inner CPI. A PDA cannot sign a top-level wallet transaction.
 
-### Behaviour
+The supervisor in this branch can **freeze and unfreeze** pools and **disable and enable** token inputs. Program freeze (`freeze_pool_program`) means permanently removing upgrade authority; pool freeze (`freeze_pools`) only changes pool operating flags. Their effects are different. The complete permissions and limitations are in [pool controls](../safety/pool-controls.md).
 
-- **EXACT_IN.** The program computes the exact output amount from
-  `amount_in` and the current pool state and pays it out — see
-  [Pricing Model](math.md) for the formula.
-- A swap fee (set per pool) is deducted from `amount_in` before the
-  swap formula is evaluated. The fee stays in the pool; a share of
-  it is set aside for the protocol.
-- The transaction reverts on insufficient output (`minimum_amount_out`
-  not met), if the pool is disabled, or if the computed output
-  exceeds the pool's available balance.
+## Reading and building
 
-### Events
+Use `CubicPoolClient.sync()` for a quote-ready snapshot: it combines pool state, mint metadata, BPT supply/program and chain time. `decodeContractAccount` exposes the exact stored ABI; check RPC account ownership as well as its discriminator. `get_pool_info` emits a convenient but incomplete `PoolInfo` event: it omits admin, range-manager, selloff and surge-policy fields. Read the account itself for those fields.
 
-`Swap` is emitted on success. Fields include input/output mints,
-amounts, the user, the swap fee, the protocol fee, and a timestamp.
-Indexers / dashboards should subscribe to this event.
+Use `buildContractInstruction(config, program, instruction, args, accounts, remainingAccounts)` for any of the 59 instructions. Its program selectors are `cubicPool`, `protocolAdmin`, and `singleTokenLiquidity`; argument and account keys use IDL snake_case. Integers wider than 32 bits are `BN`, pubkeys are `PublicKey`, and optional absent arguments are `null`. Higher-level clients add account derivation and quote guards, while the generic encoder only checks ABI shape and widths. It does not grant authority or bypass runtime constraints. See [SDK](../sdk/index.md).
 
----
+## Migration compatibility
 
-## `add_liquidity` / `remove_liquidity`
+Current pool accounts remain **1,683 bytes**, config accounts **202 bytes**. The v4-to-v5 update reinterpreted per-token bytes and used reserved storage. `migrate_to_v5(reactivate_tokens)` backfills a zero pool policy bitmap from its config and, only when requested, sets every token input-active flag to true. It does not resize accounts or rewrite balances.
 
-Proportional join and exit. Used by vault integrations and the
-single-token-deposit helper (see
-[SDK / Single-token deposit](../sdk/single-token-deposit.md)).
-
-Integrators typically don't compose these by hand — use
-`@cube/sdk` (`CubicPoolClient.addLiquidity`, `removeLiquidity`),
-which derives accounts and minimum-out calculations from the
-current pool state.
-
----
-
-## Pool discovery
-
-To list all pools:
-
-```ts
-import { Connection, PublicKey } from "@solana/web3.js";
-
-const accounts = await connection.getProgramAccounts(
-  new PublicKey("8iQtGj9mcUfFUGaiCpPy89swC3s8YTC8FhVZWfgeZhwu"),
-  // Anchor's 8-byte discriminator filter is the standard approach;
-  // see the IDL for the CubicPool account schema.
-);
-```
-
-Each `CubicPool` account encodes the pool's tokens, weights, swap fee
-rate, and the balances used for pricing. Decode it via the IDL
-(`coral-xyz/anchor`'s `Program.account.cubicPool.all()` or any Anchor
-parser of your choice).
-
-The backend at `https://api.cubee.ee` also exposes a pool index over
-REST — see [API Reference](../integration/api-reference.md).
+Use `reactivate_tokens=true` only for the verified one-time legacy transition. Repeating it later can reopen deliberately disabled tokens. Backfill is guarded by `pool.banned_extensions == 0`; this is a conditional write, not a version marker that proves a pool was migrated. The instruction does **not** accept the older 1,154-byte v3 format. Neither equal account length nor a zero reserved field alone establishes migration readiness; inspect the pre-upgrade state and preserve policy decisions.

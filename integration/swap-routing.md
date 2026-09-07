@@ -1,184 +1,87 @@
-# Swap Routing
+# Swap routing
 
-The Cube backend includes a smart order router that splits swaps across multiple pools for optimal execution. This page explains how the routing algorithm works and how integrators can use it.
+Coffer's backend can suggest how to split an exact input amount among pools containing the same token pair. Each route is a direct swap between those two mints. This service does not construct a multi-hop route through an intermediate token or submit transactions.
 
-> 🔐 **API key required** — the `/api/pools/swap-route` endpoint is part of the gated backend. Request a key via [@cubee\_chat](https://t.me/cubee_chat) or [@sepezho](https://t.me/sepezho). See [API Reference](api-reference.md) for the full auth model.
+The backend routing behavior described here comes from local `backend-v2` branch `v5.1`, revision `a886497`. SDK quote behavior comes from `@cubee_ee/sdk` 0.11.1, revision `27de819`, for contracts `96a2ee2`. These revisions are not interchangeable; the checked router does not implement every rule in the current SDK quote path.
 
----
+## Requesting a candidate allocation
 
-## Overview
-
-When a token pair exists in multiple pools, routing all volume through a
-single pool can cause unnecessarily high price impact. The Cube router splits
-the input across eligible pools using the same BigInt fixed-point math that
-the SDK and on-chain contract use for final quotes.
-
-The key rule: a route is only returned if every split can be executed by the
-contract against LP-accessible liquidity. The router never silently caps
-outputs at vault balances.
-
----
-
-## Algorithm
-
-### 1. Pool Discovery
-
-The router queries the database for all enabled pools containing the input token, then filters for pools that also contain the output token.
-
-### 2. On-Chain Balance Fetch
-
-For each candidate pool, the router fetches **fresh on-chain balances** via RPC (with a 10-second timeout). If on-chain data is unavailable for a pool, that pool is skipped entirely — stale database values are not used for routing.
-
-### 3. Eligibility
-
-Each candidate pool must:
-
-- be enabled and have swaps enabled
-- have fresh on-chain state
-- contain both tokens
-- produce a non-zero fee when `swap_fee_rate > 0`
-- have enough LP-accessible output liquidity
-
-### 4. BigInt Allocation
-
-The optimizer uses integer amounts and exact SDK quotes:
-
-1. Start with zero allocation for each eligible pool
-2. Pick a chunk size based on total input
-3. For each chunk, quote `currentAllocation + chunk` through each pool with
-   `@cube/sdk` `calcOutGivenIn`
-4. Assign the chunk to the pool with the best marginal output
-5. Reduce chunk size until the full input is allocated exactly
-
-This is slower than a floating-point derivative search, but it avoids
-precision drift on large balances and exactly matches the contract's reject
-conditions.
-
-### 5. Output Calculation
-
-Once allocations are determined, each pool's expected output is computed using the on-chain swap formula:
-
-```
-amountOut = virtualBalanceOut * (1 - (virtualBalanceIn / (virtualBalanceIn + amountInAfterFee)) ^ (weightIn / weightOut))
+```ts
+const route = await backend.getSwapRoute(
+  tokenInMint,
+  tokenOutMint,
+  amountInRawString,
+  inputMintDecimals,
+);
+if (!route.ok) throw new Error(route.error.humanMessage);
 ```
 
-Inputs match cubic-pool's on-chain `swap` exactly: raw
-`virtualBalanceIn` / `virtualBalanceOut` drive the formula and the
-LP-accessible output balance is supplied only as the cap:
+`backend` is a `CubeBackendClient`, mint addresses are strings, and the input amount is a decimal string in raw input-token units. Passing actual input decimals matters for display and XP estimates. The checked REST route accepts `tokenIn`, `tokenOut`, `amountIn`, and `decimalsIn`; see the [API reference](api-reference.md#routing-estimates).
 
-```
-lpActualOut = actualBalanceOut - protocolFeesOwedOut    // saturating
-```
+The optimizer begins with chunks of about one 128th of the requested input, chooses a candidate by marginal estimated output, and refines the allocation with smaller chunks. It also compares with single-pool alternatives. This is a heuristic search, not a proof of globally optimal execution. If it finds no candidate or cannot reconcile the allocated input to the full request, the service returns an empty route set and zero expected output.
 
-If the SDK math reports `AmountOutExceedsBalance` (i.e. the formula's
-`amountOut` would exceed `lpActualOut`), the candidate route is treated as
-unroutable; output is not silently capped.
+The response includes raw allocated amounts and estimated outputs per pool, percentage allocations, token indices/programs, nullable vault addresses, and aggregate price/fee displays. An empty route is a failure to find an allocation, not permission to execute a partial amount silently.
 
-### 6. Response
+## Limits of the checked backend implementation
 
-The router returns:
-- Per-pool splits with amounts, percentages, and vault addresses
-- Per-leg token program IDs for mixed SPL Token / Token-2022 pools
-- Total expected output
-- Effective price (output per input)
-- Price impact (vs. spot price)
-- Partial liquidity flag if insufficient capacity
+The router reads pool data and uses `calcOutGivenIn`, but it does not call the full `CubicPoolClient.quoteSwap`. Its local implementation has important differences from the v5 quote:
 
----
+- It derives an output-reserve cap by subtracting accrued protocol fees from actual balances. In v5, actual balances already exclude that separately tracked bucket.
+- It uses indexed pool swap-fee metadata, including a fallback for zero-valued fee metadata, instead of consistently using the synced pool fee.
+- It does not include the current sell-off window/cap and dynamic output-fee integration used by the deployed swap instruction.
 
-## Fee Math
+Consequently, its estimated output and allocation can differ from executable v5 swaps. These are source findings at `a886497`; a later or different backend deployment may have addressed them. Updating the SDK dependency alone does not replace the router's surrounding reserve/fee/state logic.
 
-The router replicates the exact on-chain fee calculation:
+The SDK method signature also accepts `slippageBps` and `pool`, and declares `minReceived` plus per-route `minAmountOut`. The checked backend DTO/controller neither uses those extra query options nor emits those minimum fields. Do not use the TypeScript type as evidence that an output floor was returned. In particular, do not interpret missing floor fields as zero.
 
-```javascript
-fee = floor(amountIn * feeRate / 1_000_000)
-amountInAfterFee = amountIn - fee
-```
+## Turning an allocation into instructions
 
-Swaps where the fee rounds to zero (when `feeRate > 0`) are rejected, matching the on-chain behavior.
+For each suggested pool, create a `CubicPoolClient`, sync it, find the mint indices from that synced state, and quote the allocated amount locally. Reject and recompute a route when any leg is disabled, unsupported, cap-limited, stale, or unquotable. A successful quote accounts for fees and state at the read time; it cannot reserve that state until execution.
 
----
+```ts
+import BN from "bn.js";
+import { PublicKey } from "@solana/web3.js";
+import { CubicPoolClient } from "@cubee_ee/sdk";
 
-## Spot Price
+const client = new CubicPoolClient({
+  config,
+  poolAddress: new PublicKey(candidate.poolAddress),
+});
+const synced = await client.sync();
+if (!synced.ok) throw new Error(synced.error.humanMessage);
 
-Per-pool spot price (no-trade reference):
+const tokenInIndex = synced.data.tokens.findIndex(
+  (t) => t.mint.toBase58() === tokenInMint,
+);
+const tokenOutIndex = synced.data.tokens.findIndex(
+  (t) => t.mint.toBase58() === tokenOutMint,
+);
+const quote = client.quoteSwap(
+  tokenInIndex,
+  tokenOutIndex,
+  new BN(candidate.amountIn),
+  5_000, // 0.5% in SDK hundredths-bps units
+);
+if (!quote.ok) throw new Error(quote.error.humanMessage);
 
-```
-spotPrice = (virtualBalanceOut / weightOut) / (virtualBalanceIn / weightIn)
-```
-
-The response's `spotPrice` is a weighted average across all routed pools.
-
----
-
-## Price Impact
-
-```
-priceImpact = (spotPrice - effectivePrice) / spotPrice * 100
-```
-
-A positive value means the trade executes worse than spot. Larger trades have higher impact.
-
----
-
-## Integration Example
-
-### Step 1: Query the Route
-
-```bash
-curl "https://api.cubee.ee/api/pools/swap-route?tokenIn=So11111111111111111111111111111111111111112&tokenOut=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amountIn=1000000000"
+const built = client.buildSwapTx({
+  user: walletPublicKey,
+  tokenInIndex,
+  tokenOutIndex,
+  amountIn: quote.data.amountIn,
+  minAmountOut: quote.data.minAmountOut,
+});
+if (!built.ok) throw new Error(built.error.humanMessage);
 ```
 
-### Step 2: Build Transactions
+This example builds one unsigned leg from application-provided `candidate`, config, mints, and wallet. The SDK checks invalid indices, so a missing mint is an error. Sum the validated leg input amounts and require that they equal the user's chosen total. Display the sum of newly quoted net outputs and the sum of signed minimum outputs, rather than mixing old backend estimates with new SDK floors.
 
-For each route in the response, build a Solana `swap` instruction:
+For multiple legs in distinct pools, compose the instructions only when they fit the message and compute limits. `compileBuiltTx` accepts one pool ALT; composing a multi-pool message may require your own v0 message compilation with all needed lookup tables. When legs are sent in separate transactions, partial completion is possible and the UI must account for confirmed legs before retrying the remainder.
 
-```typescript
-for (const route of response.data.routes) {
-  const ix = await program.methods
-    .swap(
-      new BN(route.amountIn),
-      new BN(minAmountOut),     // apply your slippage tolerance
-      route.tokenInIndex,
-      route.tokenOutIndex,
-    )
-    .accounts({
-      pool: new PublicKey(route.poolAddress),
-      tokenMintIn: new PublicKey(tokenInMint),
-      tokenMintOut: new PublicKey(tokenOutMint),
-      userTokenAccountIn: userTokenAccountIn,
-      userTokenAccountOut: userTokenAccountOut,
-      vaultIn: new PublicKey(route.vaultIn),
-      vaultOut: new PublicKey(route.vaultOut),
-      user: wallet.publicKey,
-      tokenProgramIn: new PublicKey(route.tokenProgramIn),
-      tokenProgramOut: new PublicKey(route.tokenProgramOut),
-    })
-    .instruction();
+For repeated swaps touching the same pool, independently quoting each against one unchanged cache does not simulate their sequence. Consolidate the leg where appropriate or simulate the cumulative state changes. STLD's internal sequence is handled by its dedicated [single-token quote](../sdk/single-token-deposit.md).
 
-  transaction.add(ix);
-}
-```
+## Prices, fees, and XP
 
-### Step 3: Sign and Send
+The SDK quote exposes net `amountOut`, gross output, dynamic output fee, input swap fee, and protocol share. `priceImpactHbps` uses hundredths of a basis point. The backend display uses percentage fields and a best-candidate spot baseline; those values are not the same unit or necessarily the same calculation. See [pool mathematics](../technical/math.md) for the transaction quote.
 
-```typescript
-const signature = await sendTransaction(transaction, connection);
-```
-
-If the route spans multiple pools, each swap instruction is independent and can be included in the same transaction (Solana supports multiple instructions per transaction).
-
----
-
-## Accuracy
-
-The router delegates every candidate and final output calculation to
-`@cube/sdk`, which is the TypeScript fixed-point port of the Rust
-`CubicMath::calc_out_given_in` implementation. It subtracts
-`protocolFeesOwed` before quoting and treats SDK `AmountOutExceedsBalance`
-errors as unroutable pools.
-
-Always apply a slippage tolerance (e.g., 0.5%–1%) to `minimum_amount_out` to account for:
-- Price movement between quote and execution
-- Minor precision differences
-- Other trades executing before yours
+Backend `estimatedXp` is a rewards estimate derived from fee valuation, the epoch rate, and an optional authenticated referral boost. It is neither on-chain output nor a guaranteed immediate credit. Confirmed transactions still need to be indexed and processed by the [three-hour XP accrual](../rewards/cube-xp.md).

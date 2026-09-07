@@ -2,7 +2,8 @@
 
 ## Introduction
 
-* [What is Cube?](README.md)
+* [Coffer: the Cubic Pool AMM](README.md)
+* [Versions and Compatibility](technical/versions.md)
 
 ## Overview
 
@@ -11,19 +12,22 @@
 
 ## For Liquidity Providers
 
-* [How Yield is Generated](for-lps/how-yield-is-generated.md)
-* [Liquidity (Add / Remove)](for-lps/liquidity.md)
+* [How LP Fee Income is Generated](for-lps/how-yield-is-generated.md)
+* [Liquidity: Seed, Add and Remove](for-lps/liquidity.md)
 * [Tracking Pool Activity](for-lps/tracking-pool-activity.md)
 
 ## For Traders
 
 * [Swapping](for-traders/swapping.md)
+* [Dynamic Fee (Surge Fee)](for-traders/dynamic-fee.md)
 * [Max-Selloff Window](for-traders/max-selloff.md)
 
 ## Technical
 
 * [Smart Contracts](technical/smart-contracts.md)
-* [Pricing Model](technical/math.md)
+* [Pricing and Liquidity Math](technical/math.md)
+* [Instruction Reference](technical/instruction-reference.md)
+* [Accounts and Events](technical/accounts-events.md)
 
 ## Integration
 
@@ -32,14 +36,15 @@
 
 ## SDK
 
-* [Overview](sdk/index.md)
-* [Single-token deposit](sdk/single-token-deposit.md)
+* [SDK Overview](sdk/index.md)
+* [SDK Reference](sdk/reference.md)
+* [Single-Token Deposit](sdk/single-token-deposit.md)
 
 ## Rewards
 
 * [Cube XP](rewards/cube-xp.md)
 
-## Safety & Governance
+## Safety and Governance
 
 * [Pool Controls](safety/pool-controls.md)
 
@@ -49,4 +54,4 @@
 
 ## License
 
-* [License (BUSL-1.1)](license.md)
+* [License by Repository](license.md)

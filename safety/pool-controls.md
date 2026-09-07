@@ -1,266 +1,116 @@
 # Pool Controls
 
-Cube pools expose a layered authority model: **per-pool admin** (`pool_admin`), **protocol-wide admin** (`protocol_admin` → Treasury PDA), and an optional **range manager** (delegated rebalancer). Each authority has a specific subset of instructions it can call. This page enumerates every admin instruction on the `cubic_pool` program, what it does, who can sign it, and how the on-chain handler validates inputs.
+This page describes the executable authority checks in contracts `audit-fixes-excluded-SF` at [`96a2ee2`](https://github.com/coffer-so/contracts/tree/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs), as exposed by SDK 0.11.1. It does not infer governance structure from a PDA address or assume the frontend exposes every instruction.
 
-The frontend exposes most of these as forms on the **Admin Panel** (`/pool-admin/:poolAddress`) and **Range Manager Panel** (`/pool-manager/:poolAddress`). The on-chain source of truth is `programs/cubic-pool/src/instructions/`.
+## Authorities
 
----
+| Role | Stored on | Powers |
+| --- | --- | --- |
+| Pool admin | `pool.pool_admin`; initially the creator/payer | Base swap fee, token input and swap toggles, selloff/surge policy, range-manager appointment and limits, pool-admin succession and renunciation, first seed deposit, ALT |
+| Config protocol authority | `config.protocol_admin`; initially Treasury PDA | Pool operating switch, protocol fee share and collection, extension defaults/floor, token input and swap toggles, emergency withdrawal, scoped SOL recovery, config-authority succession, migration, ALT |
+| Range manager | `pool.range_manager` plus enabled flag | `range_manager_update` under its configured bounds |
+| Treasury admin | `treasury.admin` | All Protocol Admin wrappers, Treasury withdrawals, program lifecycle, supervisor assignment and Treasury succession |
+| Treasury supervisor | `treasury.supervisor`; zero means absent | Batch pool freeze **and unfreeze**, token input disable **and enable** |
 
-## Authority model
+The pool creator usually signs their own direct Cubic Pool instructions. The config's protocol authority may be a wallet or PDA after a valid transfer; when it is the Treasury PDA, use the corresponding `protocol_admin` wrapper. Only that program can sign for its Treasury PDA. There is no automatic multisig or timelock in this code; wallet or governance security must be evaluated separately.
 
-| Authority | Pubkey field | Set how | Owns |
-|---|---|---|---|
-| `pool_admin` | `pool.pool_admin` | Set at `initialize_cubic_pool`, transferable 2-step | Swap fee, swap toggle, range manager (set + config), max-selloff, ALT init, admin transfer / renounce |
-| `protocol_admin` | `config.protocol_admin` (resolves to Treasury PDA via protocol-admin program) | Set at config init | Master `pool_enabled` kill, banned-extension bitmap, protocol-fee rate, protocol-fee collection. Also has CPI wrappers for some pool-admin ops. |
-| `range_manager` | `pool.range_manager` | Set by `pool_admin` via `set_range_manager` | `range_manager_update` only (within configured envelope) |
+Authority checks still apply when a pool is paused. A full pause blocks trading, LP operations, and range-manager updates; it does not disable recovery and administrative controls needed to manage the pause.
 
-Both admin pubkeys are pubkeys, not necessarily multisigs — but in production both resolve to PDAs (Treasury, governance) so no single key can act unilaterally.
+## Operating switches
 
----
+| Control | Signer path | Effect |
+| --- | --- | --- |
+| `set_pool_enabled(false)` | Config protocol authority; Treasury admin through `pool_set_pool_enabled` | Stops swaps, LP add/remove, STLD and range-manager updates |
+| `freeze_pools` / `unfreeze_pools` | Treasury admin or configured supervisor | Sets `pool_enabled` false/true for each `[config, pool]` pair, atomically within one transaction |
+| `set_swaps_enabled(false)` | Pool admin or config protocol authority; Treasury admin wrapper | Stops direct swaps and STLD, leaves proportional LP operations available |
+| `set_token_active(index, false)` | Pool admin or config protocol authority; Treasury admin/supervisor wrapper | Rejects the token only as swap input; buying it as output remains possible |
 
-## Pool-admin instructions
+The supervisor in this branch is not freeze-only. It can reverse the pauses and token disables it is allowed to make. Revoking it with `set_supervisor(Pubkey::default())` removes that role; it does not reverse any existing pool or token flags. The first supervisor assignment to an old Treasury account can grow it from 786 to 818 bytes, paid by the admin.
 
-All require `pool.pool_admin` to sign. Most are exposed as one-form-each on the **Admin Panel**.
+An inactive token and a sidelined token are different. Inactive means `is_active=false`; sidelined means `actual_balance=0`. A sidelined token cannot be paid out until funded, but if input-active it may become live through a swap into the pool. Proportional deposits cannot independently revive a zero-reserve slot.
 
-### `set_swap_fee_rate`
+## Fees and selloff configuration
 
-```rust
-set_swap_fee_rate(ctx: Context<SetSwapFeeRate>, swap_fee_rate: u32)
+Only the pool admin sets `swap_fee_rate`, bounded to 100,000 on a 1,000,000 scale (10%). Config protocol authority sets `protocol_fee_rate`, bounded to 5,000 on a 10,000 scale (50% of the base swap fee). There is no Treasury wrapper to replace a pool admin's base-fee setting.
+
+`set_max_selloff(params)` is pool-admin only. It replaces a complete vector of `SelloffParams`, one per token, with the cap, window period, dynamic-fee threshold, low/mid/high rates and optional kink. It does not reset the accumulated window state. A cap reduction can therefore reject the next swap immediately. `max_selloff_pct=0` disables both the limiter and surge for that token; zero high rate disables surge while leaving an enabled limiter.
+
+The cap is a percentage of a virtual-balance snapshot captured for the window, not a fixed number of tokens and not a percentage of actual reserves. Gross swap input consumes headroom. The fee is based on input-token window utilization but charged in the output token, entirely into protocol fees. See the full parameter table in [pool parameters](../overview/pool-parameters.md#selloff-and-dynamic-fee-policy), the [window algorithm](../for-traders/max-selloff.md), and [math](../technical/math.md).
+
+## Range manager
+
+`set_range_manager(new_manager, enabled)` gives the pool admin full appointment and enable/disable control. A nonzero manager must be enabled to operate; a zero key cannot operate even if the flag is true. `set_range_manager_config(max_vb_change_pct, max_weight_change_pct, min_update_interval_secs, max_leverage_bps, min_leverage_bps)` is pool-admin only.
+
+The Cubic Pool handler additionally permits the config protocol authority to disable the existing manager without changing its pubkey. However, the current Protocol Admin program has no `pool_set_range_manager` CPI wrapper. When the config authority is the Treasury PDA, this specific direct disable path is not reachable through the deployed wrappers; Treasury's full pool pause remains available.
+
+A manager submits sparse `vb_changes` and `weight_changes`. Each entry is:
+
+```text
+TokenChange { index: u8, expected_current: u64, new_value: u64 }
 ```
 
-Update the swap fee. Value is in **hundredths of a basis point** (`SWAP_FEE_PRECISION = 1_000_000`): `30_000` = 3%, `100_000` = 10% (current cap).
+`expected_current` is mandatory: the stored value must still match the manager's observed value, or the update fails with `RangeManagerStaleValue`. This prevents a stale quote from overwriting intervening changes to the fields being written. It is a per-field check, not a lock on the entire pool snapshot.
 
-Constraints: `swap_fee_rate ≤ MAX_SWAP_FEE_RATE` (= 100_000 → 10%). Reverts with `FeeRateMaxExceeded` otherwise.
+Every successful update must satisfy:
 
-Frontend: **Admin Panel → Set swap fee**. Input is in **%**; the page converts to hundredths of bps (`pct × 10_000`).
+1. Pool enabled, manager enabled and nonzero, signer equals manager.
+2. Minimum interval elapsed since the last successful update.
+3. At least one change; valid token indices, no duplicates within a list, positive new values, and matching expected values.
+4. For each changed field, `abs(new − old) × 10,000 ≤ old × configured_change_pct`. Both caps are at most 10,000. A zero cap permits no nonzero change.
+5. Final weights each remain 100–9,900 and sum to 10,000.
+6. For virtual-balance slots written by this call with nonzero actual reserves, the new virtual/actual ratio lies within every enabled minimum/maximum leverage bound. Each bound uses 10,000 = 1×; zero disables that side.
 
-Effect: every subsequent swap deducts this fee from `amount_in`. LP-share = `swap_fee × (1 − protocol_fee_rate)`. See [Swapping → Fee Mechanics](../for-traders/swapping.md#fee-mechanics).
+Both ratio bounds may exceed 10,000, but if both are set, minimum must not exceed maximum. The absolute band is checked only for virtual-balance entries written by the call; a weight-only change does not write a virtual balance. Zero-reserve slots are exempt because the ratio is undefined. This allows correction of one slot when another drifted out of band through swaps or LP operations.
 
-### `set_swaps_enabled`
+The manager changes virtual balances and weights without transferring tokens. These changes can change prices and affect LP value. Percentage caps bound one step; repeated steps can compound. Time delay and the two absolute ratio bounds are separate controls. No manager update is an external oracle-price check.
 
-```rust
-set_swaps_enabled(ctx: Context<SetSwapsEnabled>, enabled: bool)
+## Admin succession and renunciation
+
+There are three independent two-step transfers:
+
+| Authority being changed | Nominate/cancel | Accept |
+| --- | --- | --- |
+| `pool.pool_admin` | Current pool admin | `pool.pending_pool_admin` signs `accept_pool_admin_transfer` |
+| `config.protocol_admin` | Current config protocol authority | `config.pending_protocol_admin` signs `accept_protocol_admin_transfer`; Treasury acceptance uses its wrapper |
+| `treasury.admin` | Current Treasury admin | `treasury.pending_admin` signs `accept_admin_transfer` |
+
+The old admin retains power until acceptance. Cancelling clears only the pending successor. Pool/config nomination rejects zero. Treasury nomination writes the supplied key without a zero/self check, but zero cannot accept; use a deliberate nonzero successor. Config-authority rotation does not change Treasury admin or a program's upgrade authority. After rotation away from Treasury, its protocol-authority-only wrappers and supervisor circuit breaker no longer authorize those pools; the independent pool-admin paths follow their own checks. Treasury-admin rotation changes who may request Treasury-signed actions without changing the Treasury PDA itself.
+
+`disable_pool_admin` permanently zeros both current and pending pool-admin fields. It removes pool-admin-only configuration access and prevents an unseeded pool's first deposit. It **does not** clear or disable an existing range manager and does not remove config/Treasury powers. It therefore does not make every economic parameter immutable. If the intended final state has no range-manager authority, disable the manager before renouncing the pool admin.
+
+`initialize_pool_alt` also requires a non-renounced pool admin even on the protocol-authority path. Provision an ALT before renunciation if needed. Creation, extension with pool-scoped addresses, and removal of the ALT authority occur in one instruction; a second initialization is rejected. The separate payer funds the table, and the ALT's address uses the signing authority and supplied recent slot. Existing ALT addresses are stored on the pool.
+
+## Token extension policy
+
+Token admission checks run during pool creation. The stored pool bitmap documents the effective policy at that point; changing the config's bitmaps does not revalidate or rewrite existing pools.
+
+```text
+hard_floor = config.hard_banned_extensions == 0 ? 512 : config.hard_banned_extensions
+effective_bitmap = (override if supplied, else config.banned_extensions) OR hard_floor
 ```
 
-Per-pool swap toggle. Less invasive than `set_pool_enabled` — LPs can still `add_liquidity` / `remove_liquidity` while swaps are paused.
+New configs initialize the default bitmap to **100684810**, covering TransferFeeConfig (1), MintCloseAuthority (3), InterestBearingConfig (10), PermanentDelegate (12), TransferHook (14), ScaledUiAmount (25), and Pausable (26). New configs initialize the hard floor to **512**, NonTransferable (9). These are code defaults; inspect stored values for an existing config.
 
-Authority: `pool_admin` OR `protocol_admin` (the latter via a CPI from the protocol-admin program). Both work.
+Independent of those bitmaps, creation rejects NonTransferable, Token-2022 native mint, malformed/non-mint or uninitialized accounts, unknown extension types above 27, a `DefaultAccountState` other than Initialized, and a TransferHook whose program ID is nonzero. Clearing a bitmap cannot override these checks. Classic mint size is 82 bytes; an extended Token-2022 mint must have its mint account-type tag and a valid TLV layout.
 
-Frontend: **Admin Panel → Enable / disable swaps**.
+The policy can admit issuer powers when a creator deliberately clears default bits and the hard floor permits it. A PermanentDelegate can affect vault custody; an issuer can freeze or pause transfers, or arm an initially inactive transfer hook later. Raw AMM balances do not automatically incorporate UI amount scaling or interest display rules. Admission is not an assurance that issuer state remains unchanged.
 
-Use case: pause trading during an investigation, while letting LPs exit cleanly.
+Runtime transfer compatibility is a separate restriction in this without-SF deployment. Its liquidity/helper/fee-recovery paths use plain token `Transfer` CPIs and do not implement transfer-fee or transfer-hook account handling. SDK 0.11.1 rejects TransferFeeConfig, TransferHook, NonTransferable, ConfidentialTransferFeeConfig, Pausable and unknown extension types in normal builders for affected tokens; the STLD builder conservatively checks every pool mint because helper dust may also be transferred. Mint parsing rejects malformed data. These guards do not replace checking current token-account state or simulating the intended transaction. A stored ban bit by itself is a disclosure flag rather than proof that an existing transfer must fail. Use the SDK's runtime diagnostics and current mint data; do not treat permission to initialize a pool as permission to execute every operation.
 
-### `set_range_manager`
+## Protocol fee collection and recovery
 
-```rust
-set_range_manager(
-    ctx: Context<SetRangeManager>,
-    new_manager: Pubkey,
-    enabled: bool,
-)
-```
+`collect_protocol_fees` transfers the owed amount from each canonical pool vault into a recipient account of the same mint and token program, then clears `protocol_fees_owed`. The recipient wallet is selected by the authorized caller; it is not forced to the Treasury. Zero-fee slots are skipped. LP actual and virtual balances stay unchanged.
 
-Set or rotate the range-manager pubkey + the enabled gate. The range manager is the only authority that can call `range_manager_update`.
+`debug_withdraw_liquidity` is an emergency recovery operation on an already disabled pool. It transfers specified token amounts but does not reconcile actual/virtual balances or BPT supply. An affected pool must remain retired: the handler does not write an irreversible retirement flag, so governance must prevent later re-enabling it. It is not an ordinary LP exit or fee collection.
 
-Pass `new_manager = Pubkey::default()` with `enabled = false` for the fully-disabled state. New pools deploy with this off by default.
+SOL recovery is scoped differently by program. Cubic Pool permits excess lamports above rent only from the authorizing config account or a pool belonging to that config. Treasury's own SOL withdrawal preserves its rent floor. STLD recovery is limited to the helper PDA of a pool belonging to the supplied config; this helper is System-owned and dataless, so its balance can be recovered in full. These paths do not withdraw pool SPL-token liquidity.
 
-Frontend: **Admin Panel → Set range manager**. Two fields: pubkey + enabled checkbox.
+Treasury `register_token` and `withdraw` support classic SPL Token accounts in this contract; they are not general Token-2022 wrappers. Registration creates up to ten Treasury vault PDAs. Withdrawal authorizes a Treasury-owned classic token account; token-program checks enforce matching token semantics.
 
-### `set_range_manager_config`
+## Program lifecycle
 
-```rust
-set_range_manager_config(
-    ctx: Context<SetRangeManagerConfig>,
-    max_vb_change_bps: u16,
-    max_weight_change_bps: u16,
-    min_update_interval_secs: u32,
-)
-```
+Treasury admin can invoke `upgrade_pool_program` for a program whose upgrade authority is Treasury. The loader verifies the program, ProgramData and buffer. The buffer must be prepared with the correct authority; remaining buffer rent goes to the specified spill account. This operation can upgrade Cubic Pool, STLD or Protocol Admin itself when authority matches.
 
-Configure the envelope the range manager must stay within on every update:
+`transfer_upgrade_authority` uses the checked loader operation: the incoming authority co-signs, and becomes the new upgrade authority. `freeze_pool_program` removes upgrade authority permanently while leaving program execution available. `close_pool_program` closes the program through the loader and refunds ProgramData rent to the recipient; it is a destructive program lifecycle operation, not a reversible pool pause.
 
-| Param | Range | Meaning |
-|---|---|---|
-| `max_vb_change_bps` | 0–10 000 | Per-update change in `virtual_balance[i]` (bps of current value). `500` = ±5%. |
-| `max_weight_change_bps` | 0–10 000 | Per-update change in `normalized_weight[i]`. Same units. |
-| `min_update_interval_secs` | `u32` | Minimum seconds between consecutive `range_manager_update` calls. Rate-limits how fast the manager can move the curve. |
-
-Constraints: both bps values must be ≤ 10 000 (= ±100%), otherwise reverts with `RangeManagerInvalidBps`.
-
-Frontend: **Admin Panel → Set range manager config**.
-
-Effect: limits how aggressively the range manager can drift the curve. Without this envelope a misconfigured manager could move spot prices arbitrarily far in one tx.
-
-### `set_max_selloff`
-
-```rust
-set_max_selloff(
-    ctx: Context<SetMaxSelloff>,
-    max_selloffs: Vec<u64>,    // length = token_count, raw units
-    period_lengths: Vec<u32>,  // length = token_count, seconds
-)
-```
-
-Set per-token sliding-window sell-side rate limits. Both vectors must be **exactly `token_count` long** — sparse updates aren't supported; to leave a token unchanged, repeat its current value.
-
-`max_selloff = 0` disables the check for that slot (period is ignored).
-
-Frontend: **Admin Panel → Set max-selloff window (per-token)**. Renders one card per token with current values pre-filled, accepts inputs in **human units** (e.g. "10" BONK), and converts to raw `u64` via `10^decimals` on send.
-
-Effect: blocks swaps that would push that token's rolling sell volume past the cap. See [Max-Selloff Window](../for-traders/max-selloff.md) for the math.
-
-### `initiate_pool_admin_transfer`
-
-```rust
-initiate_pool_admin_transfer(
-    ctx: Context<InitiatePoolAdminTransfer>,
-    new_admin: Pubkey,
-)
-```
-
-Step 1 of a 2-step admin transfer. Writes `new_admin` to `pool.pending_pool_admin`. The current `pool_admin` retains all rights until the new admin claims.
-
-Frontend: **Admin Panel → Initiate admin transfer**.
-
-### `cancel_pool_admin_transfer`
-
-```rust
-cancel_pool_admin_transfer(ctx: Context<CancelPoolAdminTransfer>)
-```
-
-Wipe `pending_pool_admin` back to `Pubkey::default()` — cancels a pending handover. Signed by the current `pool_admin`.
-
-Frontend: **Admin Panel → Cancel admin transfer**.
-
-### `accept_pool_admin_transfer`
-
-```rust
-accept_pool_admin_transfer(ctx: Context<AcceptPoolAdminTransfer>)
-```
-
-Step 2 of the transfer. **Must be signed by the wallet stored in `pool.pending_pool_admin`** — not the outgoing admin. On success: `pool_admin := pending_pool_admin`, `pending_pool_admin := default`.
-
-Frontend: **Admin Panel → Accept admin transfer**. The UI gates the submit button until the connected wallet matches `pending_pool_admin` and instructs the user to switch wallets in their extension if needed.
-
-### `disable_pool_admin`
-
-```rust
-disable_pool_admin(ctx: Context<DisablePoolAdmin>)
-```
-
-Renounce the pool-admin role. Sets `pool.pool_admin = Pubkey::default()`. **Irreversible** — once disabled, no swap-fee changes, no range-manager updates, no further admin transfers are possible. Use only when the pool's parameters are finalised and you want to credibly commit to immutability.
-
-Frontend: not currently exposed (too dangerous for a single click). Available via SDK / CLI.
-
-### `withdraw_sol`
-
-```rust
-withdraw_sol(ctx: Context<WithdrawSol>, amount: u64)
-```
-
-Pool-admin recovers any stray native SOL deposited to the pool PDA. Does NOT touch SPL token vaults — those are governed by `add_liquidity` / `remove_liquidity` only.
-
-### `initialize_pool_alt`
-
-```rust
-initialize_pool_alt(ctx: Context<InitializePoolAlt>, recent_slot: u64)
-```
-
-Provision a per-pool Address Lookup Table containing pool PDA, BPT mint, all vault ATAs, all mints, and standard programs. Address is stored in `pool.lookup_table`. The ALT is **frozen** in the same handler — no later mutation possible, so depositors don't have to trust the admin not to rug accounts.
-
-Used by the create-pool flow on the frontend to enable VersionedTransactions for 7+ token pools. See `MULTI_TOKEN_POOL_ALT_DESIGN.md` in the contracts repo for the full rationale.
-
-### `migrate_pool_v4`
-
-```rust
-migrate_pool_v4(ctx: Context<MigratePoolV4>)
-```
-
-One-shot account-format migration from the v3 layout (1154 bytes, parallel arrays) to v4 (1683 bytes, AoS). Idempotent: re-running on an already-migrated pool is a no-op. Required exactly once per pre-existing pool after the cubic-pool program was upgraded to a binary built against the v4 struct.
-
-New pools created via `initialize_cubic_pool` skip migration (born v4).
-
----
-
-## Range-manager instructions
-
-Signed by `pool.range_manager`. Only one ix in this category:
-
-### `range_manager_update`
-
-```rust
-range_manager_update(
-    ctx: Context<RangeManagerUpdate>,
-    vb_changes: Vec<TokenChange>,
-    weight_changes: Vec<TokenChange>,
-)
-```
-
-Where `TokenChange = { index: u8, new_value: u64 }` — both arrays are **sparse**: only include entries for tokens you're actually changing.
-
-Per-tx constraints (checked on chain):
-
-1. `range_manager_enabled = true`.
-2. Caller signature = `range_manager`.
-3. At least `range_manager_min_update_interval_secs` have elapsed since `range_manager_last_updated`.
-4. For each `vb_changes` entry: `|new_vb − old_vb| / old_vb ≤ max_vb_change_bps`.
-5. For each `weight_changes` entry: `|new_w − old_w| / old_w ≤ max_weight_change_bps`.
-6. Sum of resulting weights = 10 000 across all tokens.
-7. Each weight in `[MIN_WEIGHT, MAX_WEIGHT]`.
-8. No duplicate `index` within either vector.
-
-Reverts (atomic — no state changes on rejection):
-
-| Error | Trigger |
-|---|---|
-| `RangeManagerDisabled` | The `enabled` flag is false |
-| `RangeManagerUnauthorized` | Caller != `range_manager` |
-| `RangeManagerUpdateTooFrequent` | Min interval not yet elapsed |
-| `RangeManagerVbChangeTooLarge` | One VB delta exceeds bps cap |
-| `RangeManagerWeightChangeTooLarge` | One weight delta exceeds bps cap |
-| `RangeManagerEmptyUpdate` | Both vectors empty (nothing to do) |
-| `RangeManagerInvalidBps` | A bps value out of range |
-| `RangeManagerWeightSumInvalid` | Final weights don't sum to 10000 |
-| `RangeManagerDuplicateIndex` | Same index appears twice in one vector |
-
-Frontend: **Range Manager Panel** has one form with per-token cards. Each card shows current weight + leverage + balances + price range, accepts new weight (%) and new leverage. Live preview: as the operator edits, the UI computes the projected new `virtual_balance` and the projected new price range against the projected base token state — so the manager can see exactly how the AMM spot price will shift before signing.
-
-Effect: changes the curve without changing actual balances. Used to rebalance towards real market prices (so arb bots have less room to extract value) or to widen/tighten the curve in anticipation of expected flow.
-
----
-
-## Protocol-admin instructions
-
-Signed by `config.protocol_admin` (Treasury PDA). Not on the per-pool Admin Panel — exposed via separate operator tooling.
-
-| Instruction | Effect |
-|---|---|
-| `set_pool_enabled(enabled)` | Master kill switch. `false` blocks **all** operations (swap, add, remove). Use for emergency or migration. |
-| `set_protocol_fee_rate(rate_bps)` | Share of each swap fee taken by the protocol (bps; cap = 5000 = 50%). |
-| `set_banned_extensions(banned: u64)` | Bitmap of Token-2022 extensions that are rejected at pool init. Tightening is safe; loosening means new pools can include previously banned extensions but existing pools are unaffected. |
-| `collect_protocol_fees` | Sweep accumulated `protocol_fees_owed[i]` from each vault to the treasury ATA. Decreases `actual` and `virtual` proportionally so leverage stays intact. |
-| `debug_withdraw_liquidity` | Emergency-only — drain a disabled pool to recover stranded funds. Requires `pool_enabled = false`. Pool stays retired afterwards. |
-
-Most of these are also reachable through the protocol-admin program's CPI wrappers (with the Treasury PDA signing on behalf of the operator multisig).
-
----
-
-## Reading the current authority state
-
-Every admin field is on the `CubicPool` account and readable via:
-
-- On-chain: `connection.getAccountInfo(pool)` + decode (see [Tracking Pool Activity → Direct Account Deserialization](../for-lps/tracking-pool-activity.md#direct-account-deserialization)).
-- SDK: `await client.sync()` then `client.getCached()`. Fields are exposed on `PoolInfo`.
-- Backend API: `GET /api/pools/:address` returns `poolAdmin`, `pendingPoolAdmin`, `rangeManager`, `rangeManagerEnabled`, the envelope fields, and `lookupTable`. See [API Reference](../integration/api-reference.md).
-
-The frontend's Admin Panel shows the same fields in a header block with "= connected" plaques highlighting which role(s) the wallet you're connected with currently holds.
-
----
-
-## Aggregator guidance
-
-If you're routing swaps through Cube pools:
-
-- Treat `pool_enabled = false` OR `swaps_enabled = false` as **inactive** — skip for routing.
-- Treat any pool where the sliding-window selloff cap would block your `amount_in` as **rate-limited** — pre-compute headroom (see [Max-Selloff Window](../for-traders/max-selloff.md)) and either reduce `amount_in` for that leg or route around it.
-- `range_manager_update` can shift spot prices between sync and execution. Use a fresh `sync()` (≤ 1 slot old) when quoting.
+See [instruction reference](../technical/instruction-reference.md) for exact argument order, accounts, signers and CPI wrappers, and [accounts/events](../technical/accounts-events.md) for monitoring fields and known event omissions.

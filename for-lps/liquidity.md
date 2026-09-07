@@ -1,233 +1,173 @@
-# Liquidity (Add / Remove)
+# Liquidity: seed, add and remove
 
-This page covers both sides of LP flow against a Cube pool — depositing and withdrawing.
+A direct deposit or withdrawal operates on LP-owned `actual_balance`, not on
+`actual_balance - protocol_fees_owed`. Protocol fees are a separate bucket.
+All amounts below are raw token units; BPT has 9 decimals. Use `BN` for SDK
+instruction amounts and `bigint` for the pure math helpers.
 
-The on-chain context for both is the **same Anchor account struct** (`ModifyLiquidity`), so most of the integration details (account layout, leverage maintenance, slippage protection) are shared. Differences are called out per section.
+## Which operation to use
 
----
+| Operation | Preconditions | Result |
+| --- | --- | --- |
+| First/seed deposit | BPT supply is zero; signer is the nonzero current pool admin; pool enabled | Takes the supplied basket verbatim and mints invariant-based BPT |
+| Subsequent proportional add | Pool enabled; supply positive; live/sidelined amounts match the state | Takes a proportional basket within the supplied spend ceilings |
+| Proportional remove | Pool enabled; positive valid BPT request | Burns an effective BPT amount and pays proportional actual reserves |
+| Single-token deposit | Seeded pool and positive actual input reserve; pool and swaps enabled | Helper swaps internally, joins the pool, forwards BPT and refunds excess tokens |
 
-## Common context
+`swaps_enabled` and `is_active` do not gate direct add/remove. A single-token
+route requires `swaps_enabled`, and every internal swap must pass its input
+activation flag and selloff limit. Admin and token-program checks still apply.
+An enabled pool is therefore necessary but not sufficient for an operation to
+succeed.
 
-### Pool state required
+## First deposit
 
-| Flag | Add | Remove |
-|---|---|---|
-| `pool_enabled = true` | required | required |
-| `swaps_enabled` | not checked | not checked |
+The current pool admin must sign the seed. Disabling the pool admin before
+seeding prevents this path. At least one supplied token amount must be positive;
+other slots may remain sidelined with zero actual balance.
 
-LPs can always add/remove while `pool_enabled`. The `swaps_enabled` toggle only blocks the `swap` instruction.
+The seed takes the supplied amounts without proportional cropping and sets the
+actual balances to those amounts. Initial BPT is computed by the contract's
+weighted invariant from virtual balances, with token decimals normalized to six
+places. The invariant is returned as a raw BPT amount; it must fit `u64` and be
+at least **1,000 raw BPT**. The implementation has an all-virtual-balances-zero
+fallback using the supplied amounts, although normal initialization requires
+positive virtual balances.
 
-### Slippage protection
+Use `quoteSeedDeposit(user, tokenAmounts, slippageHundredthsBps?)`, then pass its
+`minimumBptAmount` to `buildAddLiquidityTx`. This quote verifies the cached
+current pool admin and reports the full basket, zero refunds and `limitingTokenIndex = -1`.
+The amount of first BPT is not a USD valuation of the deposit.
 
-Every liquidity instruction takes a slippage floor:
+## Subsequent proportional deposits
 
-- **Add:** `minimum_bpt_amount` — revert with `InsufficientBptOut` if the computed BPT mint would be smaller.
-- **Remove:** `minimum_token_amounts: Vec<u64>` (one per token) — revert with `InsufficientTokensOut` if any per-token output would be smaller.
+`token_amounts` is a **spend ceiling vector**, one value per pool token. For each
+slot with positive actual balance, the supplied ceiling must be positive. A
+slot with zero actual balance must be offered zero; normal add-liquidity cannot
+revive it. A successful swap with that token as input can revive it instead.
 
-Both protect against front-running, large concurrent trades between quote and execution, and unexpected state changes.
+For fixed-point scale `Q = 10^18`, old LP balances `A[i]`, old BPT supply `S`
+and supplied ceilings `C[i]`:
 
-### Leverage maintenance
-
-Both directions update `virtual_balance` proportionally to actual flow so the **per-token leverage ratio (`virtual / actual`) stays constant** through normal LP activity:
-
-```
-delta_virtual_i = (amount_i / old_actual_i) × virtual_balance_i   // proportional scaling
-```
-
-Range-manager updates are the only way to change leverage outside of init.
-
-### `remaining_accounts` layout
-
-Both instructions take 4 trailing accounts per token in pool order, but **the ordering between (user, vault) and (vault, user) differs by direction** — it follows the source→destination flow.
-
-Across both directions the layout is:
-
-```
-[<per-token-pair>] × N  +  [mint_0, mint_1, …]  +  [token_program_0, token_program_1, …]
-```
-
-| | Add | Remove |
-|---|---|---|
-| `i*2`     | `user_token_i` (source) | `vault_i` (source) |
-| `i*2 + 1` | `vault_i` (destination) | `user_token_i` (destination) |
-| `N*2 + i` | `mint_i` | `mint_i` |
-| `N*3 + i` | `token_program_i` | `token_program_i` |
-
-> **Note the swap.** Add: user→vault, so `user_token_i` comes first. Remove: vault→user, so `vault_i` comes first. The contract validates each direction independently.
-
-### Vault validation
-
-For each token, the contract derives the expected ATA at runtime
-(`pool` × `mint` × `token_program`) and rejects any `vault_i` that
-doesn't match. User token accounts are validated for owner + mint.
-You can't be tricked into a malicious vault.
-
----
-
-# Adding Liquidity
-
-Cube supports two deposit modes:
-
-1. **Proportional deposit** — you supply all tokens in the pool simultaneously, matching the current pool ratio. BPT is minted to you proportional to your contribution.
-2. **Single-token deposit** — you supply just ONE of the pool's tokens; a helper program splits the input across every leg, swaps internally as needed, and mints BPT. **🚧 In development — not in production yet.** See [SDK / Single-token deposit](../sdk/single-token-deposit.md) for status.
-
-The UI's main path is proportional mode. Power users can still call the on-chain `add_liquidity` directly.
-
-## How proportional add works
-
-### First deposit (empty pool)
-
-When a pool has no liquidity (`bpt_total_supply == 0`):
-
-1. User provides a positive `token_amounts[i]` for **every** pool token.
-2. The invariant is computed from the pool's virtual balances using the weighted-product formula: `I = ∏ (balance_i ^ weight_i)`.
-3. BPT minted equals the invariant value.
-4. A minimum BPT threshold (`MINIMUM_INITIAL_BPT = 1_000` raw units) is enforced to prevent pool bricking.
-5. Actual balances are set to the deposited amounts.
-
-### Subsequent deposits
-
-When a pool already has liquidity:
-
-1. User provides `token_amounts` for each token (all must be > 0).
-2. For each token, the ratio `amount / lp_accessible_balance` is computed, where `lp_accessible_balance = actual_balance − protocol_fees_owed`.
-3. `bpt_minted = bpt_supply × min(ratio_i)` — the **minimum ratio** across all tokens determines the BPT amount.
-4. Actual balances increase by the deposited amounts.
-5. Virtual balances increase proportionally to maintain leverage.
-
-The minimum-ratio rule means if you deposit more of one token relative to the pool's current composition, the excess is effectively "donated" — you only receive BPT for the proportional portion. Build your deposit amounts against the **current** pool ratio (re-read pool state right before sending).
-
-## Add instruction
-
-```rust
-pub fn add_liquidity<'info>(
-    ctx: Context<'_, '_, 'info, 'info, ModifyLiquidity<'info>>,
-    token_amounts: Vec<u64>,
-    minimum_bpt_amount: u64,
-) -> Result<()>
+```text
+r[i]       = floor(C[i] * Q / A[i])               for A[i] > 0
+r          = min(r[i])
+bptOut     = floor(S * r / Q)
+deposit[i] = floor(A[i] * r / Q)
+left[i]    = C[i] - deposit[i]
 ```
 
-Required accounts:
+Only `deposit[i]` leaves the user's wallet. The unused `left[i]` stays there;
+it is not donated and there is no refund transfer for a direct add. The SDK
+calls this unused portion `refundAmounts`.
 
-| Account | Type | Description |
-|---|---|---|
-| `pool` | `CubicPool` (mut) | The pool account |
-| `bpt_mint` | `Mint` (mut) | Pool's BPT mint (PDA) |
-| `user_bpt_account` | `TokenAccount` (mut) | User's BPT token account |
-| `user` | `Signer` | User providing liquidity |
-| `token_program` | `TokenInterface` | Token program for the BPT mint; pool token programs are passed in `remaining_accounts` |
+Example in raw units: actual `[1,000,000, 3,000,000]`, ceilings
+`[150,000, 300,000]` and supply `1,000,000,000` yield ratio 0.1, actual deposits
+`[100,000, 300,000]`, unused amounts `[50,000, 0]` and `100,000,000` new BPT.
 
-Plus `remaining_accounts` as laid out [above](#remaining_accounts-layout) (user-source variant).
+The operation must mint positive BPT and meet `minimum_bpt_amount`. The normal
+SDK builder requires a positive minimum, even though the raw contract argument
+can be zero. `quoteAddLiquidity(ceilings, slippageHundredthsBps?)` returns the
+cropped amounts, unused amounts, BPT result, minimum BPT and limiting token.
 
-### Example: 3-token pool
+Actual balances grow by the amounts actually transferred. Every virtual
+balance grows by `floor(oldVirtual[i] * r / Q)`, including sidelined slots.
+Enabled selloff-window buckets and their virtual-balance snapshots are rescaled
+by the same ratio. These are integer operations, so do not assume the final
+virtual/actual ratios are mathematically identical at raw-unit precision.
 
-```
-remaining_accounts = [
-    user_sol_account,   // [0] user's SOL (source)
-    sol_vault,          // [1] pool's SOL vault (destination)
-    user_usdc_account,  // [2]
-    usdc_vault,         // [3]
-    user_btc_account,   // [4]
-    btc_vault,          // [5]
-    sol_mint,           // [6]
-    usdc_mint,          // [7]
-    btc_mint,           // [8]
-    sol_token_program,  // [9]
-    usdc_token_program, // [10]
-    btc_token_program,  // [11]
-]
-```
+### Rounding limit in this contract version
 
-## BPT calculation
+This revision computes BPT from the ceiling ratio before rounding each actual
+transfer. At very small raw balances, a live transfer can round to zero while
+BPT is positive. That can dilute existing LP shares without matching reserve
+funding. It is a contract limitation, not a protocol-fee charge.
 
-Use [`@cube/sdk` → `CubicPoolClient.quoteAdd`](../sdk/index.md) or simulate the transaction to get the exact mint amount before broadcasting. The on-chain formula for subsequent deposits:
+SDK 0.11.1 quotes and normal add-liquidity builders reject a proportional
+basket with a zero rounded live-token leg. Generic instruction construction
+does not enforce that SDK policy, and client checks do not repair the contract.
+The exact integer formulas above are documented for compatibility; they are not
+a claim that every permitted contract edge case is safe.
 
-```
-ratio_i    = amount_in_i / lp_accessible_balance_i        // 18-dec fixed point
-min_ratio  = min(ratio_0, ratio_1, …, ratio_n)
-bpt_amount = bpt_supply × min_ratio / 1e18
-```
+## Proportional withdrawals
 
-## Important considerations (add)
+There is no direct single-token withdrawal instruction. A removal pays the
+pool's current basket; conversion to one token requires additional swaps and
+has its own fees, capacity and slippage constraints.
 
-- **All amounts must be > 0 on the first deposit** so a pool cannot be seeded with missing token balances.
-- **First deposit must mint ≥ 1 000 raw BPT** (prevents pool bricking via dust deposits).
-- `swaps_enabled` does **not** affect add — LPs can always add when `pool_enabled = true`.
-- Protocol fees in `protocol_fees_owed[i]` are excluded from `lp_accessible_balance`, so depositors don't pay BPT against liquidity that belongs to the protocol.
+Let `B` be requested raw BPT, `S` the pre-burn supply and `Q = 10^18`:
 
-## Events (add)
-
-| Event | Carries |
-|---|---|
-| `LiquidityAdded` | user, token amounts deposited, BPT minted, timestamp |
-| `PoolStateLog` | full pool state snapshot for backend indexing |
-
----
-
-# Removing Liquidity
-
-Cube supports **proportional withdrawals** only — you burn BPT and receive all pool tokens back proportionally to your BPT share.
-
-## How proportional remove works
-
-1. User specifies `bpt_amount` to burn and `minimum_token_amounts` for per-token slippage.
-2. Withdrawal ratio: `ratio = bpt_amount / bpt_total_supply`.
-3. For each token: `amount_out[i] = actual_balance[i] × ratio`.
-4. Slippage check: each `amount_out >= minimum_token_amounts[i]`.
-5. Tokens are transferred from vaults to user.
-6. Actual and virtual balances are updated.
-7. BPT is burned from the user's account.
-
-BPT supply is read **before** any CPI to prevent manipulation. Pending protocol fees stay accounted for in `protocol_fees_owed[i]` and are settled separately via `collect_protocol_fees`.
-
-## Remove instruction
-
-```rust
-pub fn remove_liquidity<'info>(
-    ctx: Context<'_, '_, 'info, 'info, RemoveLiquidity<'info>>,
-    bpt_amount: u64,
-    minimum_token_amounts: Vec<u64>,
-) -> Result<()>
+```text
+require 0 < B <= S
+burn       = min(B, S - 1,000)                   require burn > 0
+r          = floor(burn * Q / S)
+out[i]     = floor(A[i] * r / Q)
+newA[i]    = A[i] - out[i]
+newV[i]    = V[i] - floor(V[i] * r / Q)          saturating subtraction
 ```
 
-Required accounts: same set as add (pool, bpt_mint, user_bpt_account, user, token_program), but `remaining_accounts` follow the **vault-source** variant — `vault_i` first, then `user_token_i`.
+The two floors in `r` and `out` matter; replacing them with one final division
+can change raw outputs. The user must hold the BPT actually burned. Unburned
+BPT stays in the wallet; it is not transferred to a burn address. Repeating a
+withdrawal cannot remove the minimum supply floor.
 
-### Example: 3-token pool
+`quoteRemove(requestedBpt)` returns `tokenOuts` and `effectiveBptIn`. Derive
+`minimumTokenAmounts` from those outputs, not from an unclamped 100% withdrawal.
+The SDK builder requires an explicit floor vector of the correct length; zeros
+are allowed but disable protection for those outputs.
 
-```
-remaining_accounts = [
-    sol_vault,          // [0] pool's SOL vault (source)
-    user_sol_account,   // [1] user's SOL (destination)
-    usdc_vault,         // [2]
-    user_usdc_account,  // [3]
-    btc_vault,          // [4]
-    user_btc_account,   // [5]
-    sol_mint,           // [6]
-    usdc_mint,          // [7]
-    btc_mint,           // [8]
-    sol_token_program,  // [9]
-    usdc_token_program, // [10]
-    btc_token_program,  // [11]
-]
-```
+Protocol-fee counters are not redeemed by BPT and remain unchanged. Selloff
+buckets and snapshots shrink with the burn ratio when the limiter is enabled.
+No swap fee or surge fee is charged by direct removal. Token-program, Solana
+transaction and account-creation costs are separate concerns.
 
-## Withdrawal calculation
+## Instruction accounts
 
-```
-ratio        = bpt_amount / bpt_total_supply        // 18-dec fixed point
-amount_out_i = actual_balance_i × ratio / 1e18
-```
+Both instructions use these five named accounts, with separate Anchor context
+structs (`ModifyLiquidity` for add, `RemoveLiquidity` for remove):
 
-## Important considerations (remove)
+| Account | Access | Meaning |
+| --- | --- | --- |
+| `pool` | Writable | The CubicPool account |
+| `bpt_mint` | Writable | Pool-derived BPT mint |
+| `user_bpt_account` | Writable | User-owned account for that BPT mint |
+| `user` | Signer | Owner supplying tokens or burning BPT |
+| `token_program` | Read-only | Actual owner program of the BPT mint |
 
-- `bpt_amount` must be > 0 and ≤ the user's BPT balance.
-- `bpt_amount` must be ≤ `bpt_total_supply`.
-- `swaps_enabled` does **not** affect remove.
-- If burning your BPT would push `bpt_supply` below `MINIMUM_INITIAL_BPT`, the instruction silently caps the burn at the level that leaves the floor intact — the unused BPT stays in your wallet. Re-call if you actually intended to drain the pool (you can't bring supply to zero).
+There must also be exactly `4 * N` remaining accounts:
 
-## Events (remove)
+| Position | Add | Remove |
+| --- | --- | --- |
+| `2*i` | User token account, writable | Pool vault, writable |
+| `2*i + 1` | Pool vault, writable | User token account, writable |
+| `2*N + i` | Token mint, read-only | Token mint, read-only |
+| `3*N + i` | That mint's token program | That mint's token program |
 
-| Event | Carries |
-|---|---|
-| `LiquidityRemoved` | user, BPT burned, token amounts received, timestamp |
-| `PoolStateLog` | full pool state snapshot for backend indexing |
+These are paired accounts followed by two blocks, not `N` groups of four.
+Vaults are derived ATAs for `(pool, mint, tokenProgram)`. On add, a zero offered
+slot skips user-token-account validation/transfer; the full account list remains
+required. On remove, user token accounts are validated even for zero outputs.
+BPT's program and each reserve token's program may differ.
+
+Builders return instructions, not signed transactions. For larger pools, compile
+with the pool's ALT via `compileBuiltTx`, check transaction size and required
+accounts, then use the wallet to sign and send. Reserve-token SOL is wrapped
+SOL; direct add/remove builders do not automatically wrap or unwrap it.
+
+## Single-token deposit and events
+
+The deployed single-token helper runs actual swap CPIs, then a proportional
+add, BPT forwarding and token refunds in one deposit transaction. Its whole-route
+minimum BPT protects the final result. Existing helper balances can affect the
+join and refunds. See the [single-token guide](../sdk/single-token-deposit.md)
+for allocation math, separate setup, helper balances and the 10-token limit.
+
+`LiquidityAdded` records the transferred basket and minted BPT;
+`LiquidityRemoved` records the effective burn and actual outputs. Their
+`PoolStateLog` companion contains balance vectors, not every field of the pool.
+A helper deposit also emits internal swap/join events plus its final
+`SingleTokenDeposit` event. Avoid counting the same economic action twice.
+
+Sources: [add handler](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/add_liquidity.rs),
+[remove handler](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/remove_liquidity.rs),
+[SDK client](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/clients/CubicPoolClient.ts).

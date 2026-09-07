@@ -1,62 +1,71 @@
-# What is Cube?
+# Coffer: the Cubic Pool AMM
 
-**Cube** is a weighted automated market maker (AMM) on **Solana**.
-Each pool holds 2–9 tokens with configurable weights and a virtual
-liquidity layer that lets pools quote tight spreads without
-requiring deep on-chain inventory.
+Coffer is a weighted multi-token AMM on Solana. Pools keep actual token reserves
+for settlement and virtual balances for pricing. Liquidity providers hold BPT,
+the pool's share token; traders exchange one pool token for another.
 
----
+These pages describe the `audit-fixes-excluded-SF` contract revision `96a2ee2`
+and SDK `@cubee_ee/sdk` source version **0.11.1**, revision `27de819`, checked on
+**2026-09-07**. Some code identifiers still use the Cube name. See the
+[version and compatibility notes](technical/versions.md) before integrating.
 
-## At a glance
+## Capabilities
 
-| Feature | Description |
+| Capability | Current behavior |
 | --- | --- |
-| Multi-asset pools | 2–9 tokens per pool via UI/SDK (10 supported on-chain via CLI deploy) |
-| Custom weights | 1%–99% per token, sums to 100% |
-| Capital-efficient pricing | Virtual liquidity layer for tight spreads |
-| Proportional liquidity | No tick management — all LPs earn proportionally |
-| Configurable swap fee | Up to 10% per pool |
-| SPL Token & Token-2022 | Both standards supported (with extension allow-list) |
-| Smart order routing | Public backend splits swaps across pools for best execution |
+| Pool composition | 2–10 distinct mints; SDK accepts 10, transaction size must still fit |
+| Token weights | 1%–99% each, total 100%; an enabled range manager can change them within configured limits |
+| Virtual liquidity | Pricing depth is separate from the actual reserves available to pay out |
+| Liquidity | Seed by the current pool admin, proportional add/remove and a single-token deposit helper |
+| Base swap fee | Input-token fee, configurable up to 10% |
+| Dynamic fee | Optional output-token surge charge tied to the input token's sliding selloff window |
+| Protocol accounting | Protocol fees are tracked separately from LP-owned actual balances |
+| Token programs | Classic SPL Token and compatible Token-2022 mints, including Token-2022 BPT |
+| Contract access | Three programs, 59 instructions; the SDK exposes the complete typed instruction ABI |
 
----
+Virtual depth does not create redeemable inventory. A quote that exceeds the
+available actual output balance fails, even when the virtual curve has capacity.
+Fees and depth do not guarantee an LP return or a particular market price.
 
-## What you can do with the API
+## Start here
 
-| You want to | Use |
-| --- | --- |
-| Get a quote for a swap | [`@cube/sdk` → `CubicPoolClient.getSwapQuote`](sdk/index.md) |
-| Compose a swap transaction | [`@cube/sdk` → `CubicPoolClient.swap`](sdk/index.md) |
-| Route a swap across multiple pools | [Swap Routing](integration/swap-routing.md) |
-| List pools / find by token pair | [API Reference](integration/api-reference.md) |
-| Index live trades | Subscribe to the `Swap` event on the on-chain program |
-| Show TVL / volume / fees | Use the protocol's [DefiLlama listing](https://defillama.com/protocol/cube) |
+- [Core concepts](overview/core-concepts.md): reserves, weights, BPT and token state.
+- [Liquidity](for-lps/liquidity.md): seed, spend ceilings, withdrawal floors and rounding.
+- [Swapping](for-traders/swapping.md): exact-input settlement and minimum output.
+- [Dynamic fee](for-traders/dynamic-fee.md): threshold, slopes, kink, four-segment calculation and examples.
+- [Max-selloff window](for-traders/max-selloff.md): snapshot cap, carryover and window changes.
+- [Pool controls](safety/pool-controls.md): authority roles, pauses and range-manager powers.
+- [SDK](sdk/index.md) and [SDK reference](sdk/reference.md): actual method names, arguments and return types.
+- [Contract instruction reference](technical/instruction-reference.md): every on-chain instruction.
+- [Accounts and events](technical/accounts-events.md): storage layouts and indexing fields.
 
----
+## Read and quote through the SDK
 
-## Quick links
+```typescript
+import BN from "bn.js";
+import { PublicKey } from "@solana/web3.js";
+import { CubicPoolClient, getConfig } from "@cubee_ee/sdk";
 
-- [Core Concepts](overview/core-concepts.md) — pool composition, weights, virtual liquidity
-- [Pool Parameters](overview/pool-parameters.md) — what's configurable per pool
-- [Pricing Model](technical/math.md) — swap formula and fee behaviour
-- [Smart Contracts](technical/smart-contracts.md) — instructions integrators call
-- [API Reference](integration/api-reference.md) — backend REST endpoints (**API key required** — see below)
-- [Swap Routing](integration/swap-routing.md) — split-route execution
-- [Pool Controls](safety/pool-controls.md) — pause flags and authority model
-- [FAQ](faq.md)
-- [License (BUSL-1.1)](license.md) — Cube is source-available, not open source
+async function quoteOneToken(poolAddress: PublicKey) {
+  const client = new CubicPoolClient({ config: getConfig("mainnet"), poolAddress });
+  const state = await client.sync();
+  if (!state.ok) throw new Error(state.error.humanMessage);
 
----
+  const amountIn = new BN(10).pow(new BN(state.data.tokens[0].decimals));
+  return client.quoteSwap(0, 1, amountIn, 1_000); // 0.1% slippage budget
+}
+```
 
-> **Note on licensing.** Cube is released under the **Business Source License 1.1**. The source is public so it can be reviewed and integrated against, but it is **not permission to fork and redeploy the protocol**. See [License](license.md) for details. The license auto-converts to Apache 2.0 on 2030-05-12.
+This reads accounts and computes a quote; it does not sign or send a transaction.
+Builders, wallet signing, sending and confirmation are separate steps. Use the
+final minimum output or minimum BPT from a refreshed quote.
 
----
+## Backend and licensing
 
-## Getting API access
+The [backend API](integration/api-reference.md) provides indexed pool data,
+portfolio information and routing. Its availability, authentication and update
+cadence are separate from the contracts and SDK. Some SDK methods require a
+newer backend than the source snapshot checked here; the API reference marks them.
 
-The Cube backend (pools list, swap routing, stats, leaderboard, transactions feed) is gated behind an API key. **Reach out before integrating** — we issue keys per-project and can advise on rate limits / preferred RPC endpoints.
-
-- Telegram chat: **[@cubee\_chat](https://t.me/cubee_chat)**
-- Direct: **[@sepezho](https://t.me/sepezho)**
-
-The on-chain program is permissionless — anyone can call its instructions directly. The API gating only applies to the convenience backend that wraps RPC reads with prices, TVL, and pool metadata.
+Licenses differ by repository: the checked SDK is MIT; the checked contracts and
+this documentation use BUSL-1.1. See [License](license.md) for the authoritative files.

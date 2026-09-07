@@ -1,386 +1,108 @@
-# @cubee_ee/sdk
+# SDK
 
-📦 **npm**: <https://www.npmjs.com/package/@cubee_ee/sdk>
+`@cubee_ee/sdk` is Coffer's TypeScript library for reading pools, quoting swaps and liquidity operations, and constructing Solana instructions. These pages describe SDK **0.11.1**, source revision `27de819`, against the contracts in `audit-fixes-excluded-SF` at `96a2ee2`. See [version scope](../technical/versions.md) for the source revisions used by this documentation.
 
-A TypeScript client for interacting with Cube pools on Solana.
-Designed for integrators (aggregators, wallets, bots) who want quotes,
-swap transactions, or pool data without re-implementing the on-chain
-math.
+The SDK builds unsigned instructions and transactions. Your application supplies the wallet, obtains signatures, submits transactions, and confirms their outcome. `AdminClient.initializeTreasuryIfMissing` is an explicit exception: it can send a transaction through its Anchor provider.
 
-The SDK ships fresh Anchor IDLs and handles RPC retries, account parsing, PDA derivation, and human-readable error mapping for you.
-
----
-
-## Install
+## Installation and configuration
 
 ```bash
-npm install @cubee_ee/sdk
+npm install @cubee_ee/sdk @solana/web3.js bn.js
 ```
 
-Peer dependencies: `@solana/web3.js`, `@solana/spl-token`, `@coral-xyz/anchor`.
-
----
-
-> 🔐 **Backend access requires an API key.** Calls into `CubeBackendClient` (list pools, swap-route, stats, leaderboard) need a Cube API key. Pool **on-chain** calls go directly to your RPC and do not require a key.
->
-> Request a key:
->
-> - Telegram chat: **[@cubee\_chat](https://t.me/cubee_chat)**
-> - Direct: **[@sepezho](https://t.me/sepezho)**
->
-> Pass it via `getConfig({ apiKey })`. The SDK adds `X-Cube-Api-Key` to every backend request automatically.
-
----
-
-## The `SdkResult<T>` contract
-
-**Every** public SDK method returns `SdkResult<T>` — never throws on expected failures.
+Use the package version matching your deployed contracts. The version documented here identifies the checked source; it does not by itself establish which version your package registry or lockfile resolves.
 
 ```ts
-type SdkResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: { code: SdkErrorCode; humanMessage: string; cause?: unknown } };
+import BN from "bn.js";
+import { PublicKey } from "@solana/web3.js";
+import { CubicPoolClient, getConfig } from "@cubee_ee/sdk";
 
-type SdkErrorCode =
-  | "invalid_input"        // bad arg / out-of-range / decode failure
-  | "insufficient_funds"   // not enough balance / pool liquidity
-  | "slippage_exceeded"    // amount_out < min_amount_out, or BPT < min
-  | "math_overflow"        // u128 saturate, division by zero
-  | "pool_disabled"        // master kill switch on
-  | "swaps_disabled"       // per-pool swap toggle off
-  | "not_found"            // pool / token / endpoint 404
-  | "rpc_unavailable"
-  | "rpc_rate_limited"
-  | "rpc_timeout"
-  | "backend_unavailable"
-  | "backend_unauthorized" // missing / wrong API key
-  | "unknown";
+const config = getConfig("mainnet", {
+  rpcEndpoints: [primaryRpcUrl, fallbackRpcUrl],
+  rpcTimeoutMs: 2_000,
+  rpcCommitment: "confirmed",
+  slippageHundredthsBps: 5_000, // 0.5%
+});
+
+const pool = new CubicPoolClient({
+  config,
+  poolAddress: new PublicKey(poolAddress),
+});
+const synced = await pool.sync();
+if (!synced.ok) throw new Error(synced.error.humanMessage);
+
+const quote = pool.quoteSwap(0, 1, new BN("1000000"), 5_000);
+if (!quote.ok) throw new Error(quote.error.humanMessage);
+
+const built = pool.buildSwapTx({
+  user: walletPublicKey,
+  tokenInIndex: 0,
+  tokenOutIndex: 1,
+  amountIn: quote.data.amountIn,
+  minAmountOut: quote.data.minAmountOut,
+});
+if (!built.ok) throw new Error(built.error.humanMessage);
+// built.data.instructions are unsigned. Compile, sign, send, and confirm
+// through your application's transaction flow.
 ```
 
-Anchor program errors are auto-mapped from the contract IDL to these categories — the SDK is the single place that knows about every cubic-pool error code, you just check `error.code`.
+The example assumes your application supplies the RPC URLs, pool address, and wallet public key. Configuration overrides are **flat**: pass `rpcEndpoints` and `slippageHundredthsBps` directly to `getConfig`, not inside a `defaults` object. The returned `CubeConfig` contains a `defaults` object.
 
----
+A nonempty `rpcEndpoints` list replaces the endpoint list. A single `rpcEndpoint` is tried before the network's default fallbacks. `getConfig` defaults to confirmed commitment, a two-second RPC timeout, a 1,400,000 compute-unit suggestion, and **5%** quote slippage. Set slippage explicitly for your application.
 
-## Top-level clients
+## Units and state
 
-| Client | Purpose |
+| Value | Representation and scale |
 | --- | --- |
-| `CubicPoolClient` | Per-pool quotes, swap / add / remove liquidity, sync state, parse events |
-| `CubeBackendClient` | List pools, fetch routing splits, leaderboard, time-series stats, prices |
-| `PoolFactoryClient` | Build pool-creation transactions (`initialize_config`, `initialize_cubic_pool`) |
-| `AdminClient` | Treasury + pool-admin operations (initiate/accept/cancel transfer, set fees, enable flags, register tokens, collect protocol fees) |
-| `SingleTokenDepositClient` | LP helper for single-token deposits (devnet only — see [SDK / Single-token deposit](single-token-deposit.md)) |
+| Token amounts, supplies, virtual balances | `BN`, in raw integer units; use the mint's decimals only for display |
+| Math helper amounts | `bigint`; preserve integers when converting to or from `BN` |
+| BPT amounts | Raw units of the pool's BPT mint; BPT has nine decimals |
+| Weights | `10_000 = 100%`; all weights sum to `10_000` |
+| Swap fee and SDK slippage | `1_000_000 = 100%`; `5_000 = 0.5%` |
+| Protocol share of the swap fee | `10_000 = 100%`; this is a share of the fee, not of the whole trade |
+| Sell-off percentages and fee slopes | `10_000 = 100%`, except `feeKinkPct`, which uses whole percent |
+| Range leverage limits | `10_000 = 1×`; zero disables the corresponding bound |
+| Quote time override | Unix seconds, not milliseconds |
 
----
+`sync()` reads the pool, its mints, BPT supply, and Solana Clock. `getCached()` returns the last successful snapshot. Reads are not an atomic snapshot across all accounts, and quotes do not reserve liquidity. Sync again before building a user decision around a quote, and use explicit output floors when signing.
 
-## Config
+For v5 accounts, `actualBalance` is the LP reserve. Protocol fees are tracked separately. Do not subtract `protocolFeesOwed` from `actualBalance` a second time. The SDK quote path uses the current integer math, fee rounding, sell-off windows, dynamic output fees, proportional deposits, and minimum remaining BPT rules described in [pool mathematics](../technical/math.md).
 
-```ts
-import { getConfig, type CubeConfig } from "@cubee_ee/sdk";
+## Pool and liquidity lifecycle
 
-const cfg = getConfig("mainnet", {
-  backendEndpoint: "https://api.cubee.ee",
-  apiKey: process.env.CUBE_API_KEY,
-  defaults: {
-    rpcEndpoint: "https://your-rpc.example",
-    commitment: "confirmed",
-    slippageHundredthsBps: 30_000,     // 3% default for swaps
-  },
-});
-```
+1. Select an existing config, or have the protocol admin build a config initialization through `PoolFactoryClient.buildInitializeConfigTx`. Config initialization uses the protocol-admin wrapper; the returned config keypair must also sign.
+2. Call `PoolFactoryClient.buildDeployPoolTx` to initialize a pool and its BPT mint. Token, weight, and virtual-balance vectors share one order. This step does not seed reserves.
+3. The pool admin uses `quoteSeedDeposit` for the first deposit and passes its `minimumBptAmount` into `buildAddLiquidityTx`.
+4. Later depositors use `quoteAddLiquidity`. Input amounts are **spend ceilings**. Show `depositAmounts` as the estimated amounts actually deposited; `refundAmounts` remain in the wallet.
+5. For an exit, use `quoteRemove`. Its `effectiveBptIn` can be smaller than the request because the pool preserves 1,000 raw BPT. Pass an explicit per-token minimum vector into `buildRemoveLiquidityTx`.
 
-`getConfig(network, overrides?)` returns the program IDs, default RPC, and slippage defaults for the network (`"mainnet"` or `"devnet"`). Any field is overridable.
+For a one-token entry into an existing pool, see [single-token deposits](single-token-deposit.md). Pool deployment and off-chain metadata registration are separate operations; `CubeBackendClient.createPool` does not deploy a Solana pool.
 
----
+## Transaction compilation and lookup tables
 
-## `CubicPoolClient` — pool operations
+Builders return `BuiltTx`, containing `instructions`, a `suggestedCuLimit`, and sometimes `extraSigners` public keys. A public key in `extraSigners` is not a private key or a signature. Keep any separately returned keypairs, such as `configKeypair`, in the application's signer flow.
 
-The main client. One instance per pool.
+`compileBuiltTx(connection, payer, built, poolInfo)` compiles an unsigned v0 transaction using `poolInfo.lookupTable`. `buildVersionedTx` accepts the instructions and optional lookup-table address directly. A missing or unreadable advertised ALT returns `alt_fetch_failed`; an undefined or zero address means no ALT. Blockhash fetching and message compilation can still throw. These helpers neither create an ALT nor guarantee that every instruction combination fits within the transaction-size limit.
 
-### Construction
+`buildInitializePoolAltTx` builds pool ALT initialization and returns the derived address. Confirm its creation and wait until its addresses are usable in a later slot before compiling dependent transactions. For larger single-token deposits, use separate setup and deposit transactions, with the pool ALT on the deposit.
 
-```ts
-import { CubicPoolClient } from "@cubee_ee/sdk";
-import { Connection, PublicKey } from "@solana/web3.js";
+## Supported tokens and ABI access
 
-const connection = new Connection(cfg.defaults.rpcEndpoint, "confirmed");
+Pool token accounts can use classic SPL Token or compatible Token-2022 mints. The SDK reads the actual mint owner and preserves the BPT token program. Admission policy and transaction compatibility are separate checks: a permissive extension bitmap does not add transfer-fee accounting or transfer-hook accounts to this deployed program. Swap/add/remove paths check the token legs involved in their operation. STLD transaction builders check every pool mint, including sidelined tokens, because the helper may return existing balances from any of its ATAs. A STLD quote can therefore succeed while its stricter builder rejects an incompatible sidelined mint. Do not promise arbitrary Token-2022 support merely because a mint passed a configurable ban list.
 
-const client = new CubicPoolClient({
-  config: cfg,
-  poolAddress: new PublicKey("CSgrEBxsghBsY1oXycBEhZVTd5PEbZuWFDZHHrtFF7yb"),
-  connection,
-});
-```
+The exported `IDLS`, `ContractInstructionMap`, `ContractAccountMap`, and `ContractEventMap` cover the three programs. `buildContractInstruction` exposes every instruction with typed arguments and explicit accounts; `decodeContractAccount`, `decodeContractEvent`, and `parseContractEvents` decode the complete current ABI. These APIs complement the convenience clients. See the [SDK reference](reference.md) and [contract instruction reference](../technical/instruction-reference.md).
 
-### `sync(): Promise<SdkResult<PoolInfo>>`
+## Results, errors, and backend integration
 
-Refresh the in-memory pool snapshot from on-chain state. Most other methods require a fresh sync — call this before every quote / build if you care about up-to-the-block accuracy. Otherwise it's safe to cache for ~1 slot.
+High-level quotes and most client operations return `SdkResult<T>`: check `ok` before reading `data`; failures contain `error.code` and `error.humanMessage`. Raw builders, math helpers, decoders, and Anchor instruction builders can throw. Do not assume that every exported function returns `SdkResult` or that successful construction proves a transaction will execute.
 
-```ts
-const r = await client.sync();
-if (!r.ok) return console.error(r.error.humanMessage);
-console.log(`Synced ${r.data.tokenCount}-token pool, TVL ${r.data.tokens.length} legs`);
-```
-
-`PoolInfo` mirrors the on-chain `CubicPool` struct — token list (mint, decimals, weight, leverage, vbal, abal), swap fee, protocol fee, flags, range-manager state, lookup table.
-
-### `getCached(): PoolInfo | undefined`
-
-Returns the last `sync()`d state without hitting RPC. Returns `undefined` if you haven't synced yet.
-
-### `quoteSwap(params): SdkResult<SwapQuote>`
-
-Quote a swap WITHOUT building or sending a tx. Pure math.
-
-```ts
-const q = client.quoteSwap({
-  tokenInIndex: 0,
-  tokenOutIndex: 1,
-  amountIn: new BN(1_000_000_000),
-  slippageHundredthsBps: 50_000, // 5%
-});
-// SwapQuote: { amountOut, minAmountOut, feeAmount, protocolFeeAmount, priceImpactBps, spotPriceBefore, spotPriceAfter }
-```
-
-| Field | Meaning |
-|---|---|
-| `amountOut` | Expected output (raw units, no slippage) |
-| `minAmountOut` | `amountOut × (1 − slippage)` — pass to `buildSwapTx` to enforce |
-| `feeAmount` | Swap fee deducted from `amount_in` |
-| `protocolFeeAmount` | Share of `feeAmount` going to protocol |
-| `priceImpactBps` | Basis-points price impact |
-| `spotPriceBefore` / `spotPriceAfter` | Curve spot before and after this trade |
-
-### `quoteAdd(amounts): SdkResult<AddQuote>`
-
-```ts
-const r = client.quoteAdd([new BN(...), new BN(...), ...]);
-// AddQuote: { bptOut, minBptOut, share, effectiveAmounts }
-```
-
-`effectiveAmounts[i]` may differ from your input if you over-supplied one token relative to the pool ratio — the contract takes only the proportional minimum and the rest is "donated" (so the SDK clamps these).
-
-### `quoteRemove(bptIn): SdkResult<{ tokenOuts: BN[] }>`
-
-```ts
-const r = client.quoteRemove(new BN(100_000));
-// tokenOuts[i] = expected amount of token i back, native units
-```
-
-Pass `tokenOuts` (with a slippage haircut) as `minimum_token_amounts` to `buildRemoveLiquidityTx`.
-
-### `quoteSingleTokenDeposit(params): SdkResult<...>` 🚧
-
-Off-chain quote for the single-token helper. **Devnet only** — see [Single-token deposit](single-token-deposit.md) for status.
-
-### `buildSwapTx(params): SdkResult<BuiltTx>`
-
-Build the **instructions** (not signed) for a swap. Pair with the wallet/signer of your choice.
-
-```ts
-const r = client.buildSwapTx({
-  user: walletPubkey,
-  tokenInIndex: 0,
-  tokenOutIndex: 1,
-  amountIn: new BN(1_000_000_000),
-  slippageHundredthsBps: 50_000,
-  // OR pass an explicit floor (overrides slippageHundredthsBps):
-  // minAmountOut: new BN(...),
-});
-// BuiltTx: { instructions: TransactionInstruction[]; computeUnits?: number; ... }
-```
-
-**Important** (since `0.2.2`): if you omit `minAmountOut` and the internal quote can't run, `buildSwapTx` now **returns an error** instead of falling back to `minAmountOut = 0` (which would have meant "accept any output, including 0"). Catch the error or always pass an explicit floor.
-
-### `buildAddLiquidityTx(params)`
-
-```ts
-client.buildAddLiquidityTx({
-  user: walletPubkey,
-  tokenAmounts: [new BN(...), ...],   // length = token_count
-  minimumBptAmount: new BN(...),
-});
-```
-
-### `buildRemoveLiquidityTx(params)`
-
-```ts
-client.buildRemoveLiquidityTx({
-  user: walletPubkey,
-  bptAmount: new BN(...),
-  minimumTokenAmounts: [new BN(...), ...],   // length = token_count
-});
-```
-
-### `buildSingleTokenDepositTx(params)` 🚧
-
-Devnet only. See [Single-token deposit](single-token-deposit.md).
-
-### `parseEventsFromLogs(logs): CubicPoolEvent[]`
-
-Pure-function helper to extract Anchor events from a transaction's `meta.logMessages`. Useful for indexers / post-trade reporting.
-
-```ts
-const tx = await connection.getTransaction(sig, { commitment: "confirmed" });
-const events = client.parseEventsFromLogs(tx?.meta?.logMessages ?? []);
-for (const e of events) {
-  if (e.kind === "Swap") {
-    console.log("Swap:", e.amountIn, "→", e.amountOut);
-  }
-}
-```
-
-Decoded events: `Swap`, `LiquidityAdded`, `LiquidityRemoved`, `PoolStateLog`, `SwapFeeRateUpdated`, `ProtocolFeeRateUpdated`, `PoolEnabledUpdated`, `SwapsEnabledUpdated`, `MaxSelloffSet`, `MaxSelloffWindowAdvanced`, `RangeManagerSet`, `RangeManagerConfigSet`, `RangeManagerUpdated`, `ProtocolFeesCollected`.
-
-### `helperPda(): PublicKey`
-
-The per-pool helper PDA used by the single-token-deposit program. Mostly internal; exposed for advanced integrators that derive accounts manually.
-
----
-
-## `CubeBackendClient` — REST wrapper
-
-Wraps every endpoint in [API Reference](../integration/api-reference.md). Reads the API key from `cfg.apiKey`.
+The backend client has a separate constructor:
 
 ```ts
 import { CubeBackendClient } from "@cubee_ee/sdk";
-const backend = new CubeBackendClient({ config: cfg });
+
+const backend = new CubeBackendClient({ apiEndpoint: backendUrl });
+const pools = await backend.listPoolsRaw(20, 0);
 ```
 
-| Method | Endpoint |
-|---|---|
-| `listPools()` | `GET /api/pools` |
-| `getPool(addr)` | `GET /api/pools/:address` |
-| `listPoolsRaw(limit?, offset?)` | Pagination passthrough |
-| `getPoolsByPair(a, b)` | `GET /api/pools/by-pair` |
-| `getPoolsByAdmin(wallet)` | `GET /api/pools/my` |
-| `getPortfolio(wallet?)` | `GET /api/pools/portfolio` |
-| `getPlatformStats()` | `GET /api/pools/stats` |
-| `listTokens()` | `GET /api/pools/tokens` |
-| `getTopTokens(limit?)` | `GET /api/pools/top-tokens` |
-| `getPoolTxs(addr, opts?)` | `GET /api/pools/:address/transactions` |
-| `getPoolTxStats(addr)` | `GET /api/pools/:address/tx-stats` |
-| `getSwapRoute(tokenIn, tokenOut, amountIn, decimalsIn?)` | `GET /api/pools/swap-route` |
-| `getStats(metric, window?, pool?, unit?)` | `GET /api/stats/:metric` |
-| `getLeaderboard(page, limit)` | `GET /api/leaderboard` |
-| `getLeaderboardUser(addr)` | `GET /api/leaderboard/user/:address` |
-| `getLeaderboardUserHistory(addr, from, to)` | `GET /api/leaderboard/user/:address/history` |
-| `getLeaderboardEpoch()` | `GET /api/leaderboard/epoch` |
-| `getTokenPrices(mints)` | Batched Pyth/Jup price feed |
-
-All return `SdkResult<T>`. Each typed against the response shapes in [API Reference](../integration/api-reference.md).
-
-```ts
-const r = await backend.getSwapRoute(
-  "So11111111111111111111111111111111111111112",
-  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-  "1000000000",
-  9,
-);
-if (!r.ok) return console.error(r.error.code, r.error.humanMessage);
-console.log(r.data.routes.length, "split-route legs");
-```
-
----
-
-## `PoolFactoryClient` — deploy new pools
-
-Used by the create-pool flow on the frontend (and any external integrator that wants to spin up a pool).
-
-```ts
-import { PoolFactoryClient } from "@cubee_ee/sdk";
-const factory = new PoolFactoryClient({ config: cfg });
-```
-
-### `buildInitializeConfigTx(params)`
-
-Creates a `CubicPoolConfig` account (the per-config governance container). One config can host many pools.
-
-```ts
-const r = factory.buildInitializeConfigTx({
-  payer: walletPubkey,
-  defaultProtocolFeeRate: 2000,   // 20% of swap fees go to protocol
-});
-// returns { instructions, configKeypair: Keypair }
-```
-
-The config account is a fresh keypair (not a PDA) — it must sign the tx alongside the wallet.
-
-### `buildDeployPoolTx(params)`
-
-Creates a `CubicPool` under an existing config.
-
-```ts
-factory.buildDeployPoolTx({
-  payer: walletPubkey,
-  configKey: PublicKey,
-  poolId: new BN(Date.now()),      // user-chosen salt → PDA seed
-  tokens: [mintA, mintB, ...],     // 2–9 tokens (UI cap; 10 supported on-chain)
-  weightsBps: [5000, 5000, ...],   // sum must = 10000
-  virtualBalances: [new BN(...), ...],
-  swapFeeRate: 3000,               // hundredths of bps; 3000 = 0.3%
-});
-// returns { instructions, pool, bptMint } — the latter two are derived PDAs the caller should remember
-```
-
-### `initializeCubicPoolIx(params)`
-
-Low-level: just the bare `initialize_cubic_pool` instruction without ComputeBudget wrapping. Useful if you're batching pool creation with other ixs.
-
----
-
-## `AdminClient` — admin / treasury ops
-
-Used by the Admin Panel on the frontend and by ops scripts. Most methods build the **instruction** only — you compose into a tx + sign.
-
-```ts
-import { AdminClient } from "@cubee_ee/sdk";
-const admin = new AdminClient({ config: cfg, provider });
-```
-
-| Group | Methods |
-|---|---|
-| Treasury | `initializeTreasuryIfMissing` (does check + send), `initiateAdminTransferIx`, `acceptAdminTransferIx`, `cancelAdminTransferIx` |
-| Token registry | `registerTokenIx` |
-| Withdrawals | `withdrawIx` (treasury) |
-| Pool config | `poolInitializeConfigIx`, `setProtocolFeeRateIx`, `setPoolEnabledIx`, `setSwapsEnabledIx`, `setBannedExtensionsIx` |
-| Fee collection | `collectProtocolFeesIx` |
-| Emergency | `debugWithdrawLiquidityIx` |
-
-For pool-admin ops that aren't yet wrapped by the SDK (`set_swap_fee_rate`, `set_range_manager`, `set_range_manager_config`, `set_max_selloff`, `initiate/cancel/accept_pool_admin_transfer`, `range_manager_update`), the [PoolAdmin UI](../safety/pool-controls.md) builds them directly via the IDL. PRs welcome to add SDK wrappers.
-
----
-
-## `SingleTokenDepositClient` — devnet helper 🚧
-
-Low-level wrapper around `buildSingleTokenDepositTx`. Not stable yet — see [Single-token deposit](single-token-deposit.md).
-
----
-
-## Token-2022 support
-
-Cube pools accept both classic SPL Token and Token-2022 mints, and a single pool can mix both programs. The SDK decodes `tokens[i].tokenProgram` from the on-chain pool account and threads it through every builder, so callers can pass mints straight from the pool — no extra plumbing required.
-
-What this means in practice:
-
-- `buildSwapTx`, `buildAddLiquidityTx`, `buildRemoveLiquidityTx`, and `buildSingleTokenDepositTx` derive user ATAs under the correct program and emit the right `token_program_i` in `remaining_accounts`.
-- The BPT mint always uses classic SPL Token.
-- Extensions that change transfer amounts (transfer fee, transfer hook, confidential transfer, non-transferable) are **banned** — the AMM math expects vault delta == requested amount, otherwise the contract reverts with `BannedExtension` during pool init.
-
----
-
-## When NOT to use the SDK
-
-- If you only need TVL / volume / fee data, hit the DefiLlama API (the protocol is listed under `cube`) — no key needed.
-- If you only need pool addresses + token pairs and you're OK polling a REST endpoint, the backend's `/api/pools/by-pair` (with an API key) is enough.
-
-For everything else (composing transactions, decoding events, streaming pool state with proper retries), use the SDK rather than re-deriving accounts from the IDL by hand.
-
----
-
-## Versioning
-
-The SDK follows semver. Breaking changes bump the minor version pre-1.0. Pin to a minor (`^0.2`) for stable behaviour; check the [CHANGELOG](https://github.com/cubee-ee/sdk/blob/main/CHANGELOG.md) before bumping.
-
-Notable recent fixes:
-- **`0.2.2`** — `buildSwapTx` no longer silently defaults `minAmountOut` to 0 when the internal quote fails (security: previously could build a tx accepting any output). Error map is now auto-generated from the contract IDL, so all error categorisations stay in sync with new Anchor errors.
+Backend data powers discovery, analytics, portfolios, referrals, and XP. It is not the authority for on-chain balances or contract authorization. SDK methods and a deployed backend may have different release schedules: check the [REST availability table](../integration/api-reference.md) before relying on a route or response field.

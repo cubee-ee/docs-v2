@@ -1,179 +1,139 @@
 # FAQ
 
-## General
+## What does Coffer do?
 
-### What is a Cube pool?
+It exchanges tokens within weighted multi-token pools on Solana. Pools use
+virtual balances for pricing and actual balances for settlement. BPT holders
+share the LP-owned reserves. The implementation and SDK retain some Cube names.
 
-A Cube pool is a multi-token automated market maker (AMM) on Solana with customizable weights and virtual liquidity. It uses the weighted constant-product formula (same mathematical foundation as Balancer) but with virtual balance amplification for capital-efficient pricing.
+## How many tokens can a pool contain?
 
-### How is Cube different from a standard weighted pool?
+The contracts and SDK accept 2–10 distinct mints. The transaction must still
+fit Solana's wire size and execution limits. A historical 9-token UI limit is
+not a 9-token SDK or contract rule. Larger operations use ALTs; single-token
+deposits may need separate account setup.
 
-Standard weighted pools (like Balancer V1) use only actual deposited balances for pricing. Cube adds a **virtual balance layer** — the pricing formula operates on amplified balances that can be much larger than the actual tokens in the pool. This means tighter spreads and less price impact for the same amount of deposited capital.
+## Are weights and virtual balances immutable?
 
-### What chains does Cube support?
+No. Weights start at 1%–99% each and sum to 100%, but an enabled range manager
+can change weights and virtual balances within its configured permissions.
+Updates include expected-current values to detect stale state. Virtual balances
+also change through swaps and proportional liquidity operations. See
+[Pool controls](safety/pool-controls.md).
 
-Cube is built natively on **Solana** using the Anchor framework. The smart contracts are written in Rust and compile to Solana BPF bytecode.
+## What changes when the pool admin is disabled?
 
-### Is Cube audited?
+The pool-admin key is cleared, blocking its privileged operations. This does
+not automatically disable an already appointed range manager, remove protocol
+governance or remove program upgrade authority. Renouncing one role does not
+make the whole protocol immutable.
 
-Cube has gone through professional security reviews. Audit reports will be published once the protocol moves out of its initial mainnet phase.
+## Which tokens are supported?
 
----
+Classic SPL Token and compatible Token-2022 mints can share a pool. BPT can
+also use either program. Creation policy and runtime transfer support are
+different checks: passing a mint's creation policy does not make transfer fees,
+hooks or every issuer-controlled extension safe or supported. The SDK rejects
+known incompatible transfer paths. See [Pool parameters](overview/pool-parameters.md).
 
-## Pool Creation
+## What kinds of swaps exist?
 
-### How many tokens can a pool have?
+The contract has exact-input swaps: specify input and a minimum output.
+It does not expose an exact-output swap instruction. A router can compose
+multiple pool instructions, but that is not a new on-chain swap mode.
 
-Between **2 and 10** tokens per pool.
+## How are the fees charged?
 
-### What's the minimum weight per token?
+The base fee is `ceil(amountIn * swapFeeRate / 1,000,000)` in the input token.
+The maximum base rate is 100,000, or 10%. The protocol's base-fee share is also
+rounded upward: `ceil(baseFee * protocolFeeRate / 10,000)`, with rate at most
+5,000, or 50%.
 
-**1%** (100 basis points). Maximum is **99%** (9,900 basis points). Weights must sum to exactly 100%.
+An enabled selloff policy can add a **surge fee in the output token**, all of
+which goes to the protocol. The 50% limit concerns the base fee's configured
+split, not the separate surge charge. Read [Dynamic fee](for-traders/dynamic-fee.md).
 
-### Can I change the weights after creating a pool?
+## Is the dynamic fee just the final window percentage times output?
 
-No. Weights are **immutable** — they are set at pool creation and cannot be modified.
+No. The implementation averages a piecewise-linear rate curve over portions
+of the input-token window and charges four portions of the taxed span using
+actual curve-output differences. The threshold, low/mid/high values, kink,
+integer rounding and earlier swaps in the transaction affect the result.
+It is not an exponential curve or a single final-utilization multiplier.
 
-### Can I change the virtual balances after creating a pool?
+## When does max selloff reset?
 
-Not directly. Virtual balances evolve naturally through trading, add/remove liquidity operations, and protocol fee collection. The leverage ratio (virtual/actual) is maintained proportionally through these operations.
+It is a sliding window with current usage plus a time-decayed previous bucket,
+not a daily wallet allowance. The cap uses a virtual-balance snapshot and is
+shared by everyone selling that input token into the pool. A window change,
+long idle period, or liquidity rescaling updates the stored basis differently.
+See the complete [window rules and examples](for-traders/max-selloff.md).
 
-### What token standards are supported?
+## What can make a swap fail?
 
-Both **SPL Token** and **Token-2022**. Each pool stores a token program per
-mint, so mixed SPL/Token-2022 pools are supported as long as every mint passes
-the banned-extension checks. Certain Token-2022 extensions are banned by default
-(TransferFeeConfig, ConfidentialTransferMint, NonTransferable,
-InterestBearingConfig, PermanentDelegate, TransferHook).
+Disabled pool/swaps, an inactive input token, exceeded selloff capacity,
+insufficient actual output inventory, minimum-output failure, integer bounds,
+authority/account mismatch or token-program restrictions. Gross curve output
+is checked against `actual_balance`; protocol fees must not be subtracted again.
+A successful earlier quote does not reserve inventory or window capacity.
 
----
+## Can I deposit only one token?
 
-## For Traders
+Yes, for a seeded pool with a positive actual balance of the selected input.
+The deployed helper performs swaps and a proportional join, then forwards BPT
+and refunds remaining tokens. The whole deposit has a final BPT minimum.
+See [Single-token deposit](sdk/single-token-deposit.md).
 
-### What types of swaps are supported?
+## Must the first deposit contain every token?
 
-Currently only **EXACT_IN** — you specify the input amount and receive a computed output. EXACT_OUT is not implemented; would require an on-chain `calc_in_given_out` (currently only TS off-chain quote).
+No. Only the current nonzero pool admin can seed; at least one amount must be
+positive. Other tokens may start with zero actual balance. Initial BPT comes
+from the virtual-balance invariant and must be at least 1,000 raw BPT.
 
-### How are swap fees calculated?
+## Is an oversized token in a proportional deposit donated?
 
-Fees are charged on the input token:
+No. Supplied amounts are spend ceilings. The contract crops them to the
+limiting proportional ratio and leaves the unused portion in the wallet.
+The SDK quote reports both the transferred and unused amounts.
 
-```
-fee = floor(amountIn * swapFeeRate / 1,000,000)
-```
+## Can I withdraw everything or choose only one output token?
 
-Where `swapFeeRate` ranges from 0 (no swap fee) to 10,000 (1%).
+Removal pays proportional actual reserves. It caps the BPT burn to leave
+1,000 raw BPT in circulation; unused BPT stays in the wallet. There is no direct
+single-token withdrawal. Use `quoteRemove().data.effectiveBptIn` and its output
+vector when setting withdrawal minimums.
 
-### What happens if my swap is too large?
+## Who earns the fees, and can an LP lose money?
 
-Very large swaps relative to pool depth will experience significant price impact. The contract checks output against the LP-accessible balance (`actual_balance - protocol_fees_owed`) and reverts with `AmountOutExceedsBalance` if the quote would withdraw more than the pool can serve. The backend router automatically splits large swaps across multiple pools when available and skips routes that would fail this guard.
+LP reserves receive the base fee less its protocol share. The output surge
+fee belongs entirely to the protocol. Fees are not a guaranteed total return:
+market prices, inventory changes, token behavior and manager actions can reduce
+a position's value. The current contract also has a small-amount deposit
+[rounding limitation](for-lps/liquidity.md#rounding-limit-in-this-contract-version)
+that the SDK conservatively guards against. A client guard is not a contract fix.
 
-### Does Cube support multi-hop swaps?
+## Are all methods in the SDK available on every backend?
 
-Not natively. The current implementation supports direct swaps within a single pool. However, the backend router splits across multiple pools containing the same token pair for optimal execution.
+No. The SDK exposes the full three-program instruction ABI independently of
+the REST server. Some newer `CubeBackendClient` methods target routes absent
+from the checked local backend revision. See [API compatibility](integration/api-reference.md).
+This source comparison does not establish which revision a live server runs.
 
----
+## Do these pages prove that the deployed contracts are fully safe?
 
-## For Liquidity Providers
+No. They document the selected implementation and its limits. ABI parity,
+math reference tests and read-only integration checks are different from a
+security audit or executing every administrative path on a validator. Use the
+[version notes](technical/versions.md) to identify exactly what was checked.
 
-### How do I earn fees?
+## What is the current pool account size?
 
-Swap fees accumulate in the pool's actual balances automatically. When you withdraw, you receive your proportional share of the (larger) actual balances. No claiming or harvesting is needed.
+1,683 bytes including the Anchor discriminator. V5 uses fields in space that
+was reserved in v4. Legacy v3 is 1,154 bytes and is not supported by the current
+SDK parser or the deployed `migrate_to_v5` path. See [Accounts and events](technical/accounts-events.md).
 
-### What is BPT?
+## Is the SDK licensed the same way as the contracts?
 
-BPT (Balancer Pool Token) is the LP token minted when you deposit liquidity. It represents your proportional ownership of the pool's actual balances. Each pool has a unique BPT mint with 9 decimals.
-
-### Can I deposit just one token?
-
-Yes. The default UI path uses the `single_token_liquidity` helper program:
-you provide one pool token, the helper swaps internally as needed, then calls
-the proportional `add_liquidity` instruction and forwards the BPT to you. The
-transaction still has a non-zero minimum BPT guard, so bad quotes or stale pool
-state revert atomically.
-
-Power users can still use the proportional mode directly by supplying every
-live pool token.
-
-### Can I withdraw just one token?
-
-No. Withdrawals are also **proportional** — you burn BPT and receive all pool tokens proportionally.
-
-### What about impermanent loss?
-
-Like all AMMs, Cube pools experience impermanent loss. The virtual balance leverage amplifies both fee income and IL. Higher leverage = more fee revenue but more IL exposure. This trade-off is set at pool creation and cannot be changed.
-
-### Are there minimum deposit amounts?
-
-For the first deposit: the resulting BPT must be >= 1,000 raw units (0.000001 BPT with 9 decimals). This prevents griefing attacks that could brick the pool.
-
-For subsequent proportional deposits: all live token amounts must be > 0.
-Single-token deposits must set a non-zero `minimum_bpt_amount`.
-
----
-
-## Fees
-
-### How is the fee split between LPs and protocol?
-
-The `protocol_fee_rate` determines the protocol's share of swap fees. Default is 20% (2,000 basis points), meaning:
-- **80% of swap fees** → stay in pool (benefit LPs)
-- **20% of swap fees** → tracked as `protocol_fees_owed` (collected by protocol authority)
-
-### What's the maximum protocol fee?
-
-**50%** (5,000 basis points) of the swap fee. The protocol can never take more than half.
-
-### Can fees be changed?
-
-Yes. The `pool_admin` can change the swap fee rate, and the `protocol_admin` can change the protocol fee rate. Both are subject to their respective maximums.
-
----
-
-## Integration
-
-### How do I find all available pools for a token pair?
-
-```
-GET https://api.cubee.ee/api/pools/by-pair?tokenA=<mint>&tokenB=<mint>
-```
-
-### How do I get the best swap route?
-
-```
-GET https://api.cubee.ee/api/pools/swap-route?tokenIn=<mint>&tokenOut=<mint>&amountIn=<amount>
-```
-
-This returns the optimal split across pools with expected outputs, price impact, and vault addresses needed to build the transaction.
-
-### How do I build a swap transaction from the route?
-
-The route response includes `tokenInIndex`, `tokenOutIndex`, `vaultIn`, `vaultOut`, and `poolAddress` for each split. Use these to construct Anchor `swap` instructions. See [Swap Routing](integration/swap-routing.md) for a complete TypeScript example.
-
-### Does the backend verify on-chain data?
-
-Yes. The backend verifies the Cubic Pool program bytecode against a reference binary (cached for 10 minutes). Pool data is fetched from on-chain during registration and validated. Swap routing always uses fresh on-chain balances.
-
----
-
-## Technical
-
-### What math precision does Cube use?
-
-All on-chain calculations use fixed-point arithmetic with conservative rounding (the protocol never overpays the user). See [Pricing Model](technical/math.md).
-
-### How are vaults derived?
-
-Token vaults are **Associated Token Accounts (ATAs)** derived as: `ATA(pool_pda, token_program, mint)`. They are not stored on-chain — they're derived at runtime from the pool's public key, token program, and mint address.
-
-### What's the account size for a pool?
-
-**1,154 bytes** (8-byte Anchor discriminator + 1,146-byte data). This includes
-per-token program IDs, protocol-fee balances, and 128 reserved bytes for future
-extensions.
-
-### How often does the backend sync with on-chain?
-
-- **Balances**: Every 30 seconds (transaction parser) + every 10 minutes (metrics cron)
-- **Swap routing**: Fresh on-chain fetch per request (10-second timeout)
-- **Pool startup**: Full balance sync on backend restart
+The checked SDK is MIT. The checked contracts and documentation have BUSL-1.1
+license files. Refer to the license of each repository and revision; see
+[License](license.md).

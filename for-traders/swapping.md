@@ -1,36 +1,26 @@
 # Swapping
 
-Cube supports **EXACT_IN** swaps — you specify the amount of input token, and the protocol computes the output.
+The pool supports **exact-input** swaps: you provide a gross input amount and a minimum acceptable output. The contract calculates a weighted AMM output, subtracts any applicable output-token dynamic fee, and checks the minimum against what you will actually receive.
 
----
+This page matches contracts `audit-fixes-excluded-SF` at `96a2ee2` and SDK `0.11.1` at `27de819`.
 
-## How a Swap Works
+## Execution order
 
-1. User specifies: `amount_in`, `minimum_amount_out`, `token_in_index`, `token_out_index`
-2. The program validates the pool is enabled, swaps are enabled, and token indices are valid
-3. **Max-selloff window check** — if the pool admin has set a cap on this token's `amount_in`, the swap must stay under the sliding-window threshold. See [Max-Selloff Window](max-selloff.md) for the math.
-4. Swap fee is deducted from the input: `fee = floor(amount_in * swap_fee_rate / 1,000,000)`
-5. Protocol fee is computed from the swap fee: `protocol_fee = floor(fee * protocol_fee_rate / 10,000)`
-6. LP-accessible balances are computed by excluding `protocol_fees_owed`
-7. Output is calculated using the weighted AMM formula on the scaled virtual balances
-8. The result must be <= LP-accessible output balance or the swap reverts
-9. Slippage check: `amount_out >= minimum_amount_out`
-10. Tokens are transferred: input from user to vault, output from vault to user
-11. Balances and invariant are updated
+1. Check that the pool and swaps are enabled, input is positive, and token indices are distinct and in range.
+2. Check the input token is active. An inactive token cannot be sold into the pool, but it can still be bought as output if liquidity permits.
+3. Validate mints, stored per-token token programs, user token-account owners and the pool vault addresses.
+4. Check the input token's [max-selloff window](max-selloff.md) against **gross input**, using its virtual-balance snapshot and the chain clock.
+5. Charge the base fee in input tokens, rounding up. Compute the protocol's share of that fee, also rounding up.
+6. Calculate gross output from the weighted curve using input after the base fee and the stored virtual balances.
+7. Require gross output to fit the stored **LP actual output reserve**. This reserve already excludes protocol fees.
+8. Calculate the input policy's [dynamic fee](dynamic-fee.md), charged in output tokens using four segments above the window threshold.
+9. Require `gross_output − dynamic_fee >= minimum_amount_out`.
+10. Update virtual/actual balances, fee counters and the accepted selloff state; transfer the full input from the user and the net output to the user.
+11. Emit the applicable window event, swap event and balance snapshot.
 
-### Swap Formula
+The transaction is atomic. A failed transfer or later instruction rolls back the swap and its state changes. A failed transaction that lands on-chain can still cost a network transaction fee; a simulation-only failure does not execute token transfers.
 
-```
-amountOut = virtualBalanceOut * (1 - (virtualBalanceIn / (virtualBalanceIn + amountInAfterFee)) ^ (weightIn / weightOut))
-```
-
-Where:
-- `virtualBalanceIn`, `virtualBalanceOut` — virtual balances of the respective tokens
-- `amountInAfterFee` — input amount minus swap fee
-- `weightIn`, `weightOut` — token weights (basis points, converted to 18-decimal fixed point for calculation)
-- Output is checked against `actualBalanceOut - protocolFeesOwedOut`
-
-### On-Chain Instruction
+## Instruction and accounts
 
 ```rust
 pub fn swap(
@@ -42,125 +32,109 @@ pub fn swap(
 ) -> Result<()>
 ```
 
-**Required accounts:**
+Amounts are in the respective mint's raw units. This instruction has no exact-output mode and no separate user-supplied dynamic-fee limit; the net output minimum protects the total result.
 
-| Account | Type | Description |
+| Account | Access | Requirement |
 |---|---|---|
-| `pool` | `CubicPool` (mut) | The pool account |
-| `token_mint_in` | `Mint` | Input token mint |
-| `token_mint_out` | `Mint` | Output token mint |
-| `user_token_account_in` | `TokenAccount` (mut) | User's input token account |
-| `user_token_account_out` | `TokenAccount` (mut) | User's output token account |
-| `vault_in` | `TokenAccount` (mut) | Pool's input token vault |
-| `vault_out` | `TokenAccount` (mut) | Pool's output token vault |
-| `user` | `Signer` | User signing the transaction |
-| `token_program_in` | `TokenInterface` | Must match the input token's stored program |
-| `token_program_out` | `TokenInterface` | Must match the output token's stored program |
+| `pool` | Writable | Pool account |
+| `token_mint_in`, `token_mint_out` | Read | Match the selected token slots |
+| `user_token_account_in`, `user_token_account_out` | Writable | Match the mints and belong to the signing user |
+| `vault_in`, `vault_out` | Writable | Correct pool ATAs for the mint and its token program |
+| `user` | Signer | Authorizes input transfer |
+| `token_program_in`, `token_program_out` | Read | Match each token's program stored by the pool |
 
----
+There are no remaining-account groups on the direct swap instruction. A pool can mix classic SPL Token and Token-2022 mints, but accepted extension policy does not imply every token can use this runtime transfer path. Use the SDK's compatibility checks and the [token policy documentation](../overview/pool-parameters.md).
 
-## Price Impact
+## Pricing and fee amounts
 
-Price impact depends on:
+The high-level curve is:
 
-1. **Trade size relative to virtual balances** — larger trades move the price more
-2. **Token weights** — swapping into a low-weight token causes more impact
-3. **Leverage** — higher leverage (virtual >> actual) gives tighter spreads for small trades but the same actual balance constraint
-
-For small trades, the price is approximately the spot price:
-
-```
-spotPrice(in → out) = (virtualBalanceIn / weightIn) / (virtualBalanceOut / weightOut)
-                    × 10^(decimalsOut − decimalsIn)
+```text
+curve_input  = amount_in − ceil(amount_in × swap_fee_rate / 1,000,000)
+gross_output = virtual_out × [1 − (virtual_in / (virtual_in + curve_input))^(weight_in / weight_out)]
+user_output  = gross_output − surge_fee_amount
 ```
 
-Reference: `WeightedMath::calc_spot_price` in `programs/cubic-pool/src/math/mod.rs`. The simpler `vbIn / vbOut` ratio is only correct for 50/50 pools — for asymmetric weights, missing the weight factor gives wrong prices.
+The actual implementation uses fixed-point log/exp and deliberate integer rounding. See [Pricing and Liquidity Math](../technical/math.md); do not use this real-number expression as a byte-exact quote.
 
----
+Three distinct fee amounts can appear:
 
-## Slippage Protection
+| Fee | Denomination | Destination |
+|---|---|---|
+| Base fee | Input token | Split between LP reserves and the protocol |
+| Protocol share of base fee | Input token | A portion of the base fee, not an additional charge on top of it |
+| Dynamic/surge fee | Output token | Entirely reserved for the protocol |
 
-The `minimum_amount_out` parameter protects against excessive slippage. If the calculated output is less than this amount, the transaction reverts with `SlippageExceeded`.
+The base-fee range is 0–10%, encoded with `1,000,000 = 100%`. The protocol share range is 0–50% of that fee, encoded with `10,000 = 100%`. Dynamic rate points have their own `10,000` scale and can reach 100% within the taxed portion of output. Read the configured pool policy; a pool's base fee alone does not describe its total trading cost.
 
-Set this value based on your acceptable price tolerance — typically 0.5%–1% below the expected output from the swap route API.
+The accounting is:
 
----
-
-## Max-Selloff Window
-
-Each token in a pool has an optional per-token sell-side rate limit. If your `amount_in` would push the sliding-window cumulative volume past the configured cap, the swap reverts with `MaxSelloffExceeded` **before any state mutates** — your funds stay put.
-
-The cap protects LPs against one-sided dumping. As a trader, you should:
-
-1. **Know the cap exists.** Read `pool.tokens[i].config.max_selloff` and `max_selloff_period_length` (or query via the [API](../integration/api-reference.md)). `max_selloff = 0` means no limit on that token.
-2. **Pre-compute headroom** before submitting — the sliding-window state (`previous_selloff`, `current_selloff`, `window_start_timestamp`) is in `pool.tokens[i].dynamics` and lets you predict exactly when the swap would fail.
-3. **Split or wait** if you're hitting the cap. The Cube routing backend automatically routes around capped pools when a multi-hop path exists.
-
-Full math + worked examples + on-chain reference: **[Max-Selloff Window](max-selloff.md)**.
-
----
-
-## Fee Mechanics
-
-### Swap Fee
-
-- Charged on the **input** token
-- Range: 0% to 10% (stored as `u32` in hundredths of a basis point — `10,000` = 1%, max `100,000` = 10%)
-- The fee stays in the pool vault, increasing actual balances for LPs
-- Zero-fee swaps are rejected when `swap_fee_rate > 0` (prevents dust micro-swaps)
-
-### Protocol Fee
-
-- A portion of the swap fee reserved for the protocol
-- Range: 0% to 50% of the swap fee (stored as `u16`, where 5,000 = 50%)
-- Default: 20% of the swap fee
-- Tracked in `protocol_fees_owed` per token, collected separately by the protocol authority
-- Protocol fees remain in `actual_balances` until collection; swaps and LP
-  withdrawals exclude them from LP-accessible liquidity
-- When collected, the contract decreases both actual and virtual balances
-  proportionally so leverage is preserved
-
-### Fee Calculation Example
-
-```
-Input: 1,000,000 SOL lamports
-Swap fee rate: 3,000 (= 0.3%)
-Protocol fee rate: 2,000 (= 20% of swap fee)
-
-swap_fee = floor(1,000,000 * 3,000 / 1,000,000) = 3,000 lamports
-protocol_fee = floor(3,000 * 2,000 / 10,000) = 600 lamports
-amount_in_after_fee = 1,000,000 - 3,000 = 997,000 lamports
-
-LP revenue per swap = swap_fee - protocol_fee = 2,400 lamports
+```text
+input actual/virtual  += gross_input − protocol_input_fee
+input protocol owed  += protocol_input_fee
+output actual/virtual -= gross_output
+output protocol owed += surge_output_fee
 ```
 
----
+Both protocol claims remain in the vault until collection. Collection removes those reserved amounts and clears the counters, without reducing LP actual or virtual reserves. Do not price against `actual_balance − protocol_fees_owed`.
 
-## Swap Routing (Multi-Pool)
+## Quote and slippage in the SDK
 
-If the same token pair exists across multiple pools, the Cube backend splits
-the swap across pools using the same BigInt quote math as the SDK and
-contract. Candidate routes are built from fresh on-chain state, exclude
-protocol-fee reserves from LP liquidity, and are skipped if the contract would
-reject them.
+Call `sync()` before `quoteSwap`. Example using an existing configured `CubicPoolClient`:
 
-See [Swap Routing](../integration/swap-routing.md) for details on the routing algorithm.
+```typescript
+import BN from "bn.js";
 
-### Using the Swap Route API
+const synced = await client.sync();
+if (!synced.ok) throw new Error(synced.error.humanMessage);
 
-Before submitting a swap transaction, query the backend for the optimal route:
+// 1 token with 6 decimals; slippage 5,000 / 1,000,000 = 0.5%.
+const quote = client.quoteSwap(0, 1, new BN("1000000"), 5_000);
+if (!quote.ok) throw new Error(quote.error.humanMessage);
 
+console.log({
+  userReceives: quote.data.amountOut.toString(),
+  grossOutput: quote.data.grossAmountOut?.toString(),
+  inputBaseFee: quote.data.feeAmount.toString(),
+  inputProtocolFee: quote.data.protocolFeeAmount.toString(),
+  outputSurgeFee: quote.data.surgeFeeAmount?.toString(),
+  minimumOutput: quote.data.minAmountOut.toString(),
+});
 ```
-GET https://api.cubee.ee/api/pools/swap-route?tokenIn=<mint>&tokenOut=<mint>&amountIn=<amount>
+
+Pass the resulting `minAmountOut` when building the swap. It is computed from output **after** surge. A minimum based on gross output can unnecessarily revert; a zero minimum permits a zero-output result and should not be used as ordinary user slippage protection.
+
+The optional fifth quote argument, `nowSeconds`, overrides the chain timestamp saved by `sync()`. Quotes do not reserve balances, freeze admin policy, or update the shared cache. Use fresh state close to submission and keep the output minimum on-chain even when an earlier quote succeeded.
+
+## Price impact and window failures
+
+Curve impact depends on trade size relative to virtual balances and on the weight ratio. Actual output reserves can still limit a trade even when virtual depth is large. The human-unit marginal price in **output per input** is:
+
+```text
+virtual_out × weight_in / (virtual_in × weight_out)
+  × 10^(decimals_in − decimals_out)
 ```
 
-The response includes per-pool split amounts, expected outputs, and vault addresses needed to build the transaction.
+The SDK `priceImpactHbps` compares base-fee-adjusted spot output with **net output after surge**, so it includes surge's effect. Display the fee separately if you want to explain why output falls as the window fills.
 
----
+A `MaxSelloffExceeded` result means the gross input does not fit the candidate rolling window at the execution timestamp. A smaller input or another eligible pool may fit. Waiting can restore headroom as the previous bucket decays and windows rotate, but no particular route or retry is guaranteed to be available. See [Max-Selloff Window](max-selloff.md) for snapshot rebasing, LP rescaling and exact headroom calculation.
 
-## Events Emitted
+## Multi-pool routes and single-token deposits
 
-Each swap emits two events:
+A route consists of one or more individual swaps. Each leg has its own reserves, base fee, active-token checks and selloff/dynamic-fee policy. Route outputs must include all those effects and enforce the relevant minimums. SDK contract support does not by itself prove that a deployed routing backend uses the same revision. See [Swap Routing](../integration/swap-routing.md) for the backend interface and its boundaries.
 
-1. **`Swap`** — trade details (pool, user, tokens, amounts, fees, timestamp)
-2. **`PoolStateLog`** — full pool state snapshot for backend indexing
+Single-token deposits also perform swap legs, so they consume the input token's selloff headroom and can pay surge. The helper uses a positive final BPT minimum for the whole operation rather than positive per-leg token minima. See [Single-Token Deposit](../sdk/single-token-deposit.md).
+
+## Events
+
+- `MaxSelloffWindowAdvanced`: emitted when the input limiter is enabled; contains the accepted effective volume, resolved cap, snapshot and bucket state.
+- `Swap`: includes gross `amount_in`, net `amount_out`, input-token `fee_amount` and `protocol_fee_amount`, output-token `surge_fee_amount`, token mints, pool, user and timestamp.
+- `PoolStateLog`: contains tracked virtual balances, actual balances and protocol-fee counters after the swap.
+
+The `Swap` event's gross curve output can be recovered as `amount_out + surge_fee_amount`. Do not treat the output fee as an input-token amount or subtract it a second time from event output. See [Tracking Pool Activity](../for-lps/tracking-pool-activity.md).
+
+## Sources
+
+- [Swap instruction, fee rounding and events](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/user/swap.rs)
+- [Protocol-fee collection](https://github.com/coffer-so/contracts/blob/96a2ee20244ff95fb9f14357bb55b17e1eb0e2c0/programs/cubic-pool/src/instructions/admin/collect_protocol_fees.rs)
+- [SDK quote implementation](https://github.com/coffer-so/sdk/blob/27de819c469056bfb7cd3ab3a4cfdbde741db2f8/src/clients/CubicPoolClient.ts)
